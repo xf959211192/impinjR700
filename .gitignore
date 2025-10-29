@@ -1,0 +1,33 @@
+# Visual Studio 临时目录
+.vs/
+
+# 构建输出
+bin/
+obj/
+
+# 用户特定配置文件
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# 编译中间产物
+*.pdb
+*.cache
+*.dll
+*.exe
+
+# 日志与诊断
+*.log
+*.tlog
+
+# NuGet
+*.nupkg
+packages/
+
+# 其他常见临时文件
+~$*
+*.tmp
+*.bak
+*.swp
+
