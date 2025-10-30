@@ -13,83 +13,61 @@ namespace ImpinjR700
                 .Select(item => item.Port)
                 .ToHashSet();
             var storedSelection = LoadStoredAntennaSelection();
+            var readerSelection = new HashSet<ushort>();
+
+            if (reader != null && reader.IsConnected)
+            {
+                try
+                {
+                    var settings = reader.QuerySettings();
+                    for (ushort port = 1; port <= 4; port++)
+                    {
+                        if (settings?.Antennas?.GetAntenna(port)?.IsEnabled == true)
+                        {
+                            readerSelection.Add(port);
+                        }
+                    }
+                }
+                catch (OctaneSdkException ex)
+                {
+                    AppendLog($"读取读写器天线配置失败：{ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"读取读写器天线配置时发生意外：{ex.Message}");
+                }
+            }
 
             WithAntennaAutoSaveSuppressed(() =>
             {
                 checkedListAntennas.BeginUpdate();
                 try
                 {
-                    checkedListAntennas.Items.Clear();
-
-                    if (reader == null || !reader.IsConnected)
+                    var desiredChecked = new HashSet<ushort>(readerSelection);
+                    if (desiredChecked.Count == 0)
                     {
-                        checkedListAntennas.Enabled = true;
-                        checkedListAntennas.Items.Clear();
-                        for (ushort port = 1; port <= 4; port++)
-                        {
-                            var item = new AntennaListItem(port);
-                            var isEnabled = storedSelection.Contains(port) || previousSelection.Contains(port);
-                            checkedListAntennas.Items.Add(item, isEnabled);
-                        }
-
-                        if (checkedListAntennas.Items.Count > 0 && checkedListAntennas.CheckedItems.Count == 0)
-                        {
-                            checkedListAntennas.SetItemChecked(0, true);
-                        }
-
-                        return;
+                        desiredChecked.UnionWith(previousSelection);
                     }
+                    if (desiredChecked.Count == 0)
+                    {
+                        desiredChecked.UnionWith(storedSelection);
+                    }
+                    desiredChecked.RemoveWhere(port => port < 1 || port > 4);
 
-                    var featureSet = reader.QueryFeatureSet();
-                    var settings = reader.QuerySettings();
-                    var maxPort = Math.Min((int)featureSet.AntennaCount, 32);
-                    var hasChecked = false;
-
-                    for (ushort port = 1; port <= maxPort; port++)
+                    checkedListAntennas.Items.Clear();
+                    for (ushort port = 1; port <= 4; port++)
                     {
                         var item = new AntennaListItem(port);
-                        var antenna = settings.Antennas.GetAntenna(port);
-                        var isEnabled = antenna?.IsEnabled ?? false;
-                        if (!isEnabled && (previousSelection.Contains(port) || storedSelection.Contains(port)))
-                        {
-                            isEnabled = true;
-                        }
-
-                        checkedListAntennas.Items.Add(item, isEnabled);
-                        hasChecked |= isEnabled;
+                        var isChecked = desiredChecked.Contains(port);
+                        checkedListAntennas.Items.Add(item, isChecked);
                     }
 
-                    if (!hasChecked && storedSelection.Count > 0)
-                    {
-                        foreach (ushort port in storedSelection)
-                        {
-                            var index = port - 1;
-                            if (index >= 0 && index < checkedListAntennas.Items.Count)
-                            {
-                                checkedListAntennas.SetItemChecked(index, true);
-                                hasChecked = true;
-                            }
-                        }
-                    }
-
-                    if (!hasChecked && checkedListAntennas.Items.Count > 0)
+                    if (checkedListAntennas.Items.Count > 0 && checkedListAntennas.CheckedItems.Count == 0)
                     {
                         checkedListAntennas.SetItemChecked(0, true);
                     }
 
-                    checkedListAntennas.Enabled = checkedListAntennas.Items.Count > 0;
-                }
-                catch (OctaneSdkException ex)
-                {
-                    checkedListAntennas.Items.Clear();
-                    checkedListAntennas.Enabled = false;
-                    AppendLog($"天线选择刷新失败：{ex.Message}");
-                }
-                catch (Exception ex)
-                {
-                    checkedListAntennas.Items.Clear();
-                    checkedListAntennas.Enabled = false;
-                    AppendLog($"天线选择刷新时发生意外：{ex.Message}");
+                    checkedListAntennas.Enabled = true;
                 }
                 finally
                 {

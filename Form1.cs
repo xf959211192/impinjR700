@@ -664,17 +664,25 @@ namespace ImpinjR700
 
             try
             {
-                var settings = reader.QueryDefaultSettings();
-                ConfigureReaderSettings(reader, settings);
-
+                var settings = reader.QuerySettings();
                 var storedSelection = LoadStoredAntennaSelection();
+                var appliedStoredSelection = false;
+
                 if (!HasEnabledAntenna(settings) && storedSelection.Count > 0)
                 {
                     ApplyAntennaSelection(settings, storedSelection);
+                    appliedStoredSelection = HasEnabledAntenna(settings);
                 }
 
-                reader.ApplySettings(settings);
-                AppendLog("连接初始化：已加载读写器默认设置。");
+                if (appliedStoredSelection)
+                {
+                    reader.ApplySettings(settings);
+                    AppendLog("连接初始化：保留读写器现有设置，并恢复本地天线选择。");
+                }
+                else
+                {
+                    AppendLog("连接初始化：保留读写器现有设置，无需下发配置。");
+                }
             }
             catch (OctaneSdkException ex)
             {
