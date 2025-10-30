@@ -64,6 +64,7 @@ namespace ImpinjR700
             buttonReaderInfo.Click += (_, _) => ShowReaderInfo();
             buttonStart.Click += (_, _) => StartReading();
             buttonStop.Click += (_, _) => StopReading();
+            buttonAntennaConfig.Click += (_, _) => ShowAntennaConfigurationDialog();
             buttonClear.Click += (_, _) => ClearTagData("已清空标签记录。");
             buttonExportCsv.Click += async (_, _) => await ExportCsvAsync();
             buttonExportExcel.Click += async (_, _) => await ExportExcelAsync();
@@ -84,6 +85,7 @@ namespace ImpinjR700
             checkedListAntennas.Items.Clear();
 
             UpdateExportButtons();
+            UpdateAntennaConfigurationButtonState();
         }
 
         /// <summary>
@@ -128,6 +130,7 @@ namespace ImpinjR700
                 buttonDisconnect.Enabled = true;
                 buttonStart.Enabled = true;
                 buttonStop.Enabled = false;
+                UpdateAntennaConfigurationButtonState();
                 AppendLog($"成功连接至读写器 {address}。");
             }
             catch (OctaneSdkException ex)
@@ -199,6 +202,7 @@ namespace ImpinjR700
             buttonDisconnect.Enabled = false;
             buttonStart.Enabled = false;
             buttonStop.Enabled = false;
+            UpdateAntennaConfigurationButtonState();
             AppendLog("已断开与读写器的连接。");
         }
 
@@ -231,6 +235,7 @@ namespace ImpinjR700
                     MessageBox.Show(this, message, "读取提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     buttonStart.Enabled = true;
                     buttonStop.Enabled = false;
+                    UpdateAntennaConfigurationButtonState();
                     return;
                 }
 
@@ -247,6 +252,7 @@ namespace ImpinjR700
                     MessageBox.Show(this, message, "读取提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     buttonStart.Enabled = true;
                     buttonStop.Enabled = false;
+                    UpdateAntennaConfigurationButtonState();
                     return;
                 }
 
@@ -259,17 +265,20 @@ namespace ImpinjR700
                 UpdateStatus("读取中", Color.RoyalBlue);
                 buttonStart.Enabled = false;
                 buttonStop.Enabled = true;
+                UpdateAntennaConfigurationButtonState();
                 AppendLog("标签读取已启动。");
             }
             catch (OctaneSdkException ex)
             {
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UpdateAntennaConfigurationButtonState();
             }
             catch (Exception ex)
             {
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UpdateAntennaConfigurationButtonState();
             }
         }
 
@@ -288,6 +297,7 @@ namespace ImpinjR700
             UpdateStatus("已连接", Color.DarkGreen);
             buttonStart.Enabled = true;
             buttonStop.Enabled = false;
+            UpdateAntennaConfigurationButtonState();
             AppendLog("标签读取已停止。");
         }
 
@@ -628,6 +638,7 @@ namespace ImpinjR700
                 buttonDisconnect.Enabled = false;
                 buttonConnect.Enabled = true;
                 _isReading = false;
+                UpdateAntennaConfigurationButtonState();
 
                 if (checkAutoReconnect.Checked)
                 {
@@ -675,6 +686,7 @@ namespace ImpinjR700
                             buttonDisconnect.Enabled = true;
                             buttonStart.Enabled = true;
                             buttonStop.Enabled = false;
+                            UpdateAntennaConfigurationButtonState();
                             AppendLog("重连成功。");
                         }));
                         return;
@@ -798,6 +810,55 @@ namespace ImpinjR700
             var available = !_isExporting && _tagBinding.Count > 0;
             buttonExportCsv.Enabled = available;
             buttonExportExcel.Enabled = available;
+        }
+
+        /// <summary>
+        ///  根据当前读写器状态更新“详细配置”按钮。
+        /// </summary>
+        private void UpdateAntennaConfigurationButtonState()
+        {
+            var canConfigure = _reader != null && _reader.IsConnected;
+            buttonAntennaConfig.Enabled = canConfigure;
+        }
+
+        /// <summary>
+        ///  打开详细天线配置窗口并应用用户调整。
+        /// </summary>
+        private void ShowAntennaConfigurationDialog()
+        {
+            if (_reader == null || !_reader.IsConnected)
+            {
+                MessageBox.Show(this, "请先连接读写器后再配置天线。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                UpdateAntennaConfigurationButtonState();
+                return;
+            }
+
+            if (_isReading)
+            {
+                MessageBox.Show(this, "读取进行中，无法调整天线配置，请先停止读取。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using var dialog = new AntennaConfigurationForm(_reader);
+            try
+            {
+                var result = dialog.ShowDialog(this);
+                if (result == DialogResult.OK)
+                {
+                    AppendLog("已应用详细天线配置。");
+                    RefreshAntennaSelection(_reader);
+                }
+            }
+            catch (OctaneSdkException ex)
+            {
+                AppendLog($"详细配置应用失败：{ex.Message}");
+                MessageBox.Show(this, $"配置失败：{ex.Message}", "配置错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"打开详细配置时发生意外：{ex.Message}");
+                MessageBox.Show(this, $"发生意外：{ex.Message}", "配置错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         /// <summary>
