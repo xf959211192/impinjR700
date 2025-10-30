@@ -153,28 +153,11 @@ namespace ImpinjR700
         private bool PopulateGrid(Settings? settings, Status? status, FeatureSet? featureSet)
         {
             var connectionLookup = BuildConnectionLookup(status);
+            var configLookup = BuildConfigLookup(settings);
+            var maxPort = ResolveMaxPort(featureSet, configLookup);
 
             _configs.RaiseListChangedEvents = false;
             _configs.Clear();
-
-            var maxPort = Math.Min((int)(featureSet?.AntennaCount ?? 32), 32);
-            if (maxPort <= 0 && settings?.Antennas != null)
-            {
-                foreach (AntennaConfig antenna in settings.Antennas)
-                {
-                    if (antenna == null)
-                    {
-                        continue;
-                    }
-
-                    if (antenna.PortNumber > maxPort)
-                    {
-                        maxPort = antenna.PortNumber;
-                    }
-                }
-
-                maxPort = Math.Min(maxPort, 32);
-            }
 
             if (maxPort <= 0)
             {
@@ -186,7 +169,7 @@ namespace ImpinjR700
 
             for (ushort port = 1; port <= maxPort; port++)
             {
-                var antenna = settings?.Antennas?.GetAntenna(port);
+                configLookup.TryGetValue(port, out var antenna);
                 var model = new AntennaConfigViewModel(port)
                 {
                     IsEnabled = antenna?.IsEnabled ?? false,
@@ -206,6 +189,42 @@ namespace ImpinjR700
 
             RefreshComboDataSources();
             return true;
+        }
+
+        private static Dictionary<ushort, AntennaConfig> BuildConfigLookup(Settings? settings)
+        {
+            var result = new Dictionary<ushort, AntennaConfig>();
+            if (settings?.Antennas == null)
+            {
+                return result;
+            }
+
+            foreach (AntennaConfig antenna in settings.Antennas)
+            {
+                if (antenna == null)
+                {
+                    continue;
+                }
+
+                result[antenna.PortNumber] = antenna;
+            }
+
+            return result;
+        }
+
+        private static int ResolveMaxPort(FeatureSet? featureSet, Dictionary<ushort, AntennaConfig> configLookup)
+        {
+            var maxPort = featureSet?.AntennaCount > 0
+                ? Math.Min((int)featureSet.AntennaCount, 32)
+                : 0;
+
+            if (configLookup.Count > 0)
+            {
+                var configMax = configLookup.Keys.Max();
+                maxPort = Math.Max(maxPort, Math.Min((int)configMax, 32));
+            }
+
+            return maxPort;
         }
 
         private static Dictionary<ushort, string> BuildConnectionLookup(Status? status)
