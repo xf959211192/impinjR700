@@ -42,6 +42,7 @@ namespace ImpinjR700
             this.textReaderIp = new System.Windows.Forms.TextBox();
             this.labelReaderIp = new System.Windows.Forms.Label();
             this.groupControl = new System.Windows.Forms.GroupBox();
+            this.buttonAntennaConfig = new System.Windows.Forms.Button();
             this.checkedListAntennas = new System.Windows.Forms.CheckedListBox();
             this.labelAntennaSelection = new System.Windows.Forms.Label();
             this.checkAutoReconnect = new System.Windows.Forms.CheckBox();
@@ -216,6 +217,7 @@ namespace ImpinjR700
             // 
             // groupControl
             // 
+            this.groupControl.Controls.Add(this.buttonAntennaConfig);
             this.groupControl.Controls.Add(this.checkedListAntennas);
             this.groupControl.Controls.Add(this.labelAntennaSelection);
             this.groupControl.Controls.Add(this.checkAutoReconnect);
@@ -228,6 +230,15 @@ namespace ImpinjR700
             this.groupControl.TabIndex = 1;
             this.groupControl.TabStop = false;
             this.groupControl.Text = "读取控制";
+            // 
+            // buttonAntennaConfig
+            // 
+            this.buttonAntennaConfig.Location = new System.Drawing.Point(200, 20);
+            this.buttonAntennaConfig.Name = "buttonAntennaConfig";
+            this.buttonAntennaConfig.Size = new System.Drawing.Size(120, 30);
+            this.buttonAntennaConfig.TabIndex = 2;
+            this.buttonAntennaConfig.Text = "详细配置...";
+            this.buttonAntennaConfig.UseVisualStyleBackColor = true;
             // 
             // checkedListAntennas
             // 
@@ -254,25 +265,25 @@ namespace ImpinjR700
             this.checkAutoReconnect.Location = new System.Drawing.Point(200, 132);
             this.checkAutoReconnect.Name = "checkAutoReconnect";
             this.checkAutoReconnect.Size = new System.Drawing.Size(138, 21);
-            this.checkAutoReconnect.TabIndex = 4;
+            this.checkAutoReconnect.TabIndex = 5;
             this.checkAutoReconnect.Text = "连接异常自动重试";
             this.checkAutoReconnect.UseVisualStyleBackColor = true;
             // 
             // buttonStop
             // 
-            this.buttonStop.Location = new System.Drawing.Point(200, 92);
+            this.buttonStop.Location = new System.Drawing.Point(200, 96);
             this.buttonStop.Name = "buttonStop";
             this.buttonStop.Size = new System.Drawing.Size(120, 30);
-            this.buttonStop.TabIndex = 3;
+            this.buttonStop.TabIndex = 4;
             this.buttonStop.Text = "停止读取";
             this.buttonStop.UseVisualStyleBackColor = true;
             // 
             // buttonStart
             // 
-            this.buttonStart.Location = new System.Drawing.Point(200, 56);
+            this.buttonStart.Location = new System.Drawing.Point(200, 60);
             this.buttonStart.Name = "buttonStart";
             this.buttonStart.Size = new System.Drawing.Size(120, 30);
-            this.buttonStart.TabIndex = 2;
+            this.buttonStart.TabIndex = 3;
             this.buttonStart.Text = "开始读取";
             this.buttonStart.UseVisualStyleBackColor = true;
             // 
@@ -526,6 +537,7 @@ namespace ImpinjR700
         private System.Windows.Forms.TextBox textReaderIp;
         private System.Windows.Forms.Label labelReaderIp;
         private System.Windows.Forms.GroupBox groupControl;
+        private System.Windows.Forms.Button buttonAntennaConfig;
         private System.Windows.Forms.CheckedListBox checkedListAntennas;
         private System.Windows.Forms.Label labelAntennaSelection;
         private System.Windows.Forms.CheckBox checkAutoReconnect;

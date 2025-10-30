@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -410,45 +410,84 @@ namespace ImpinjR700
             }
         }
 
-        private static bool HasEnabledAntenna(Settings settings)
-        {
-            if (settings?.Antennas == null)
-            {
-                return false;
-            }
-
-            foreach (AntennaConfig antenna in settings.Antennas)
-            {
-                if (antenna != null && antenna.IsEnabled)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static ushort? EnableFirstAvailableAntenna(Settings settings)
-        {
-            if (settings?.Antennas == null)
-            {
-                return null;
-            }
-
-            foreach (AntennaConfig antenna in settings.Antennas)
-            {
-                if (antenna == null)
-                {
-                    continue;
-                }
-
-                antenna.IsEnabled = true;
-                return antenna.PortNumber;
-            }
-
-            return null;
-        }
-
+        private static bool HasEnabledAntenna(Settings settings)
+
+        {
+
+            if (settings?.Antennas == null)
+
+            {
+
+                return false;
+
+            }
+
+
+
+            foreach (AntennaConfig antenna in settings.Antennas)
+
+            {
+
+                if (antenna != null && antenna.IsEnabled)
+
+                {
+
+                    return true;
+
+                }
+
+            }
+
+
+
+            return false;
+
+        }
+
+
+
+        private static ushort? EnableFirstAvailableAntenna(Settings settings)
+
+        {
+
+            if (settings?.Antennas == null)
+
+            {
+
+                return null;
+
+            }
+
+
+
+            foreach (AntennaConfig antenna in settings.Antennas)
+
+            {
+
+                if (antenna == null)
+
+                {
+
+                    continue;
+
+                }
+
+
+
+                antenna.IsEnabled = true;
+
+                return antenna.PortNumber;
+
+            }
+
+
+
+            return null;
+
+        }
+
+
+
         private void ConfigureReaderSettings(ImpinjReader reader, Settings settings)
         {
             settings.AutoStart.Mode = AutoStartMode.None;
