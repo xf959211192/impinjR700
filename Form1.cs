@@ -86,9 +86,11 @@ namespace ImpinjR700
                 Disconnect();
             };
 
-            checkedListAntennas.Enabled = false;
+            checkedListAntennas.Enabled = true;
             checkedListAntennas.Items.Clear();
             checkedListAntennas.ItemCheck += checkedListAntennas_ItemCheck;
+
+            PopulateOfflineAntennaSelection();
 
             UpdateExportButtons();
             UpdateAntennaConfigurationButtonState();
@@ -378,6 +380,34 @@ namespace ImpinjR700
             }
         }
 
+        private void PopulateOfflineAntennaSelection()
+        {
+            var storedSelection = LoadStoredAntennaSelection();
+            WithAntennaAutoSaveSuppressed(() =>
+            {
+                checkedListAntennas.BeginUpdate();
+                try
+                {
+                    checkedListAntennas.Items.Clear();
+                    for (ushort port = 1; port <= 4; port++)
+                    {
+                        var item = new AntennaListItem(port);
+                        var isChecked = storedSelection.Contains(port);
+                        checkedListAntennas.Items.Add(item, isChecked);
+                    }
+
+                    if (checkedListAntennas.Items.Count > 0 && checkedListAntennas.CheckedItems.Count == 0)
+                    {
+                        checkedListAntennas.SetItemChecked(0, true);
+                    }
+                }
+                finally
+                {
+                    checkedListAntennas.EndUpdate();
+                }
+            });
+        }
+
         private static void PersistAntennaSelection(IEnumerable<ushort> ports)
         {
             try
@@ -498,6 +528,14 @@ namespace ImpinjR700
                 return;
             }
 
+            var selectedPorts = checkedListAntennas.CheckedItems
+                .OfType<AntennaListItem>()
+                .Select(item => item.Port)
+                .Distinct()
+                .ToList();
+
+            PersistAntennaSelection(selectedPorts);
+
             if (_reader == null || !_reader.IsConnected)
             {
                 return;
@@ -505,12 +543,6 @@ namespace ImpinjR700
 
             try
             {
-                var selectedPorts = checkedListAntennas.CheckedItems
-                    .OfType<AntennaListItem>()
-                    .Select(item => item.Port)
-                    .Distinct()
-                    .ToList();
-
                 if (selectedPorts.Count == 0)
                 {
                     return;

@@ -23,7 +23,20 @@ namespace ImpinjR700
 
                     if (reader == null || !reader.IsConnected)
                     {
-                        checkedListAntennas.Enabled = false;
+                        checkedListAntennas.Enabled = true;
+                        checkedListAntennas.Items.Clear();
+                        for (ushort port = 1; port <= 4; port++)
+                        {
+                            var item = new AntennaListItem(port);
+                            var isEnabled = storedSelection.Contains(port) || previousSelection.Contains(port);
+                            checkedListAntennas.Items.Add(item, isEnabled);
+                        }
+
+                        if (checkedListAntennas.Items.Count > 0 && checkedListAntennas.CheckedItems.Count == 0)
+                        {
+                            checkedListAntennas.SetItemChecked(0, true);
+                        }
+
                         return;
                     }
 
