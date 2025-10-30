@@ -667,14 +667,10 @@ namespace ImpinjR700
                 var settings = reader.QueryDefaultSettings();
                 ConfigureReaderSettings(reader, settings);
 
-                if (EnsureAllPortsEnabled(settings))
+                var storedSelection = LoadStoredAntennaSelection();
+                if (!HasEnabledAntenna(settings) && storedSelection.Count > 0)
                 {
-                    AppendLog("连接初始化：已恢复天线端口为全启用状态。");
-                }
-
-                if (!HasEnabledAntenna(settings))
-                {
-                    AppendLog("连接初始化：未检测到已启用的天线端口，请在读取前确认硬件连接。");
+                    ApplyAntennaSelection(settings, storedSelection);
                 }
 
                 reader.ApplySettings(settings);
