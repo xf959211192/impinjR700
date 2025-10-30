@@ -11,11 +11,11 @@ namespace ImpinjR700
         private IContainer components = null!;
 
         /// <summary>
-        ///  清理所使用的资源。
+        ///  释放资源。
         /// </summary>
         protected override void Dispose(bool disposing)
         {
-            if (disposing && (components != null))
+            if (disposing && components != null)
             {
                 components.Dispose();
             }
@@ -23,18 +23,16 @@ namespace ImpinjR700
             base.Dispose(disposing);
         }
 
-        #region Windows 窗体设计生成的代码
+        #region Windows 窗体生成的代码
 
         private void InitializeComponent()
         {
             this.gridAntennas = new System.Windows.Forms.DataGridView();
             this.columnPort = new System.Windows.Forms.DataGridViewTextBoxColumn();
-            this.columnIsEnabled = new System.Windows.Forms.DataGridViewCheckBoxColumn();
             this.columnTxPower = new System.Windows.Forms.DataGridViewComboBoxColumn();
             this.columnRxSensitivity = new System.Windows.Forms.DataGridViewComboBoxColumn();
             this.columnConnectionStatus = new System.Windows.Forms.DataGridViewTextBoxColumn();
-            this.buttonRefresh = new System.Windows.Forms.Button();
-            this.buttonApply = new System.Windows.Forms.Button();
+            this.columnSave = new System.Windows.Forms.DataGridViewButtonColumn();
             this.buttonCancel = new System.Windows.Forms.Button();
             this.labelStatus = new System.Windows.Forms.Label();
             ((System.ComponentModel.ISupportInitialize)(this.gridAntennas)).BeginInit();
@@ -44,17 +42,17 @@ namespace ImpinjR700
             // 
             this.gridAntennas.AllowUserToAddRows = false;
             this.gridAntennas.AllowUserToDeleteRows = false;
-            this.gridAntennas.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
-            | System.Windows.Forms.AnchorStyles.Left) 
+            this.gridAntennas.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
+            | System.Windows.Forms.AnchorStyles.Left)
             | System.Windows.Forms.AnchorStyles.Right)));
             this.gridAntennas.AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.Fill;
             this.gridAntennas.ColumnHeadersHeightSizeMode = System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             this.gridAntennas.Columns.AddRange(new System.Windows.Forms.DataGridViewColumn[] {
             this.columnPort,
-            this.columnIsEnabled,
             this.columnTxPower,
             this.columnRxSensitivity,
-            this.columnConnectionStatus});
+            this.columnConnectionStatus,
+            this.columnSave});
             this.gridAntennas.EditMode = System.Windows.Forms.DataGridViewEditMode.EditOnEnter;
             this.gridAntennas.Location = new System.Drawing.Point(12, 12);
             this.gridAntennas.MultiSelect = false;
@@ -62,10 +60,11 @@ namespace ImpinjR700
             this.gridAntennas.RowHeadersVisible = false;
             this.gridAntennas.RowTemplate.Height = 28;
             this.gridAntennas.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect;
-            this.gridAntennas.Size = new System.Drawing.Size(656, 312);
+            this.gridAntennas.Size = new System.Drawing.Size(656, 358);
             this.gridAntennas.TabIndex = 0;
             this.gridAntennas.DataError += new System.Windows.Forms.DataGridViewDataErrorEventHandler(this.gridAntennas_DataError);
             this.gridAntennas.CurrentCellDirtyStateChanged += new System.EventHandler(this.gridAntennas_CurrentCellDirtyStateChanged);
+            this.gridAntennas.CellContentClick += new System.Windows.Forms.DataGridViewCellEventHandler(this.gridAntennas_CellContentClick);
             // 
             // columnPort
             // 
@@ -75,14 +74,6 @@ namespace ImpinjR700
             this.columnPort.MinimumWidth = 60;
             this.columnPort.Name = "columnPort";
             this.columnPort.ReadOnly = true;
-            // 
-            // columnIsEnabled
-            // 
-            this.columnIsEnabled.DataPropertyName = "IsEnabled";
-            this.columnIsEnabled.FillWeight = 70F;
-            this.columnIsEnabled.HeaderText = "启用";
-            this.columnIsEnabled.MinimumWidth = 70;
-            this.columnIsEnabled.Name = "columnIsEnabled";
             // 
             // columnTxPower
             // 
@@ -115,63 +106,44 @@ namespace ImpinjR700
             this.columnConnectionStatus.Name = "columnConnectionStatus";
             this.columnConnectionStatus.ReadOnly = true;
             // 
-            // buttonRefresh
+            // columnSave
             // 
-            this.buttonRefresh.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
-            this.buttonRefresh.Location = new System.Drawing.Point(12, 338);
-            this.buttonRefresh.Name = "buttonRefresh";
-            this.buttonRefresh.Size = new System.Drawing.Size(120, 32);
-            this.buttonRefresh.TabIndex = 1;
-            this.buttonRefresh.Text = "刷新状态";
-            this.buttonRefresh.UseVisualStyleBackColor = true;
-            this.buttonRefresh.Click += new System.EventHandler(this.buttonRefresh_Click);
-            // 
-            // buttonApply
-            // 
-            this.buttonApply.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.buttonApply.Location = new System.Drawing.Point(440, 338);
-            this.buttonApply.Name = "buttonApply";
-            this.buttonApply.Size = new System.Drawing.Size(120, 32);
-            this.buttonApply.TabIndex = 2;
-            this.buttonApply.Text = "保存并应用";
-            this.buttonApply.UseVisualStyleBackColor = true;
-            this.buttonApply.Click += new System.EventHandler(this.buttonApply_Click);
+            this.columnSave.HeaderText = "单独保存";
+            this.columnSave.MinimumWidth = 90;
+            this.columnSave.Name = "columnSave";
+            this.columnSave.Text = "保存";
+            this.columnSave.UseColumnTextForButtonValue = true;
             // 
             // buttonCancel
             // 
             this.buttonCancel.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
             this.buttonCancel.DialogResult = System.Windows.Forms.DialogResult.Cancel;
-            this.buttonCancel.Location = new System.Drawing.Point(568, 338);
+            this.buttonCancel.Location = new System.Drawing.Point(568, 358);
             this.buttonCancel.Name = "buttonCancel";
             this.buttonCancel.Size = new System.Drawing.Size(100, 32);
-            this.buttonCancel.TabIndex = 3;
-            this.buttonCancel.Text = "取消";
+            this.buttonCancel.TabIndex = 1;
+            this.buttonCancel.Text = "关闭";
             this.buttonCancel.UseVisualStyleBackColor = true;
             // 
             // labelStatus
             // 
-            this.labelStatus.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left) 
+            this.labelStatus.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)
             | System.Windows.Forms.AnchorStyles.Right)));
-            this.labelStatus.AutoEllipsis = true;
-            this.labelStatus.Location = new System.Drawing.Point(12, 377);
+            this.labelStatus.Location = new System.Drawing.Point(12, 386);
             this.labelStatus.Name = "labelStatus";
-            this.labelStatus.Size = new System.Drawing.Size(656, 20);
-            this.labelStatus.TabIndex = 4;
-            this.labelStatus.Text = "正在初始化...";
+            this.labelStatus.Size = new System.Drawing.Size(656, 18);
+            this.labelStatus.TabIndex = 2;
+            this.labelStatus.Text = "正在加载...";
             // 
             // AntennaConfigurationForm
             // 
-            this.AcceptButton = this.buttonApply;
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 17F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.CancelButton = this.buttonCancel;
-            this.ClientSize = new System.Drawing.Size(680, 406);
+            this.ClientSize = new System.Drawing.Size(680, 413);
             this.Controls.Add(this.labelStatus);
             this.Controls.Add(this.buttonCancel);
-            this.Controls.Add(this.buttonApply);
-            this.Controls.Add(this.buttonRefresh);
             this.Controls.Add(this.gridAntennas);
-            this.Font = new System.Drawing.Font("Microsoft YaHei UI", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
             this.KeyPreview = true;
             this.MaximizeBox = false;
@@ -186,14 +158,12 @@ namespace ImpinjR700
         #endregion
 
         private System.Windows.Forms.DataGridView gridAntennas;
-        private System.Windows.Forms.Button buttonRefresh;
-        private System.Windows.Forms.Button buttonApply;
-        private System.Windows.Forms.Button buttonCancel;
-        private System.Windows.Forms.Label labelStatus;
         private System.Windows.Forms.DataGridViewTextBoxColumn columnPort;
-        private System.Windows.Forms.DataGridViewCheckBoxColumn columnIsEnabled;
         private System.Windows.Forms.DataGridViewComboBoxColumn columnTxPower;
         private System.Windows.Forms.DataGridViewComboBoxColumn columnRxSensitivity;
         private System.Windows.Forms.DataGridViewTextBoxColumn columnConnectionStatus;
+        private System.Windows.Forms.DataGridViewButtonColumn columnSave;
+        private System.Windows.Forms.Button buttonCancel;
+        private System.Windows.Forms.Label labelStatus;
     }
 }

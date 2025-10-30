@@ -56,10 +56,6 @@ namespace ImpinjR700
             ReloadAntennaConfigurations();
         }
 
-        private void buttonApply_Click(object sender, EventArgs e)
-        {
-            ApplyConfigurations();
-        }
 
         private void ReloadAntennaConfigurations()
         {
@@ -154,39 +150,42 @@ namespace ImpinjR700
         {
             var connectionLookup = BuildConnectionLookup(status);
             var configLookup = BuildConfigLookup(settings);
-            var maxPort = ResolveMaxPort(featureSet, configLookup);
-
+            var enabledPorts = configLookup
+                .Where(pair => pair.Value?.IsEnabled == true)
+                .Select(pair => pair.Key)
+                .Where(port =>
+                {
+                    var maxSupportedPort = featureSet?.AntennaCount > 0
+                        ? Math.Min((int)featureSet.AntennaCount, 32)
+                        : 32;
+                    return port > 0 && port <= maxSupportedPort;
+                })
+                .OrderBy(port => port)
+                .ToList();
             _configs.RaiseListChangedEvents = false;
             _configs.Clear();
-
-            if (maxPort <= 0)
+            if (enabledPorts.Count == 0)
             {
                 _configs.RaiseListChangedEvents = true;
                 _configs.ResetBindings();
-                labelStatus.Text = "未获取到天线端口信息。";
+                labelStatus.Text = "当前无启用的天线端口。";
                 return false;
             }
-
-            for (ushort port = 1; port <= maxPort; port++)
+            foreach (var port in enabledPorts)
             {
-                configLookup.TryGetValue(port, out var antenna);
+                var antenna = configLookup[port];
                 var model = new AntennaConfigViewModel(port)
                 {
-                    IsEnabled = antenna?.IsEnabled ?? false,
                     TxPower = antenna != null ? Normalize(antenna.TxPowerInDbm) : _defaultTxPower,
                     RxSensitivity = antenna != null ? Normalize(antenna.RxSensitivityInDbm) : _defaultRxSensitivity,
                     ConnectionStatus = connectionLookup.TryGetValue(port, out var text) ? text : "未知"
                 };
-
                 EnsureOptionExists(model.TxPower, _txPowerOptions, _txPowerSet);
                 EnsureOptionExists(model.RxSensitivity, _rxSensitivityOptions, _rxSensitivitySet);
-
                 _configs.Add(model);
             }
-
             _configs.RaiseListChangedEvents = true;
             _configs.ResetBindings();
-
             RefreshComboDataSources();
             return true;
         }
@@ -212,21 +211,6 @@ namespace ImpinjR700
             return result;
         }
 
-        private static int ResolveMaxPort(FeatureSet? featureSet, Dictionary<ushort, AntennaConfig> configLookup)
-        {
-            var maxPort = featureSet?.AntennaCount > 0
-                ? Math.Min((int)featureSet.AntennaCount, 32)
-                : 0;
-
-            if (configLookup.Count > 0)
-            {
-                var configMax = configLookup.Keys.Max();
-                maxPort = Math.Max(maxPort, Math.Min((int)configMax, 32));
-            }
-
-            return maxPort;
-        }
-
         private static Dictionary<ushort, string> BuildConnectionLookup(Status? status)
         {
             var result = new Dictionary<ushort, string>();
@@ -249,45 +233,6 @@ namespace ImpinjR700
             return result;
         }
 
-        private void ApplyConfigurations()
-        {
-            gridAntennas.EndEdit();
-
-            try
-            {
-                buttonApply.Enabled = false;
-
-                var settings = _reader.QuerySettings();
-                foreach (var model in _configs)
-                {
-                    var antenna = settings.Antennas.GetAntenna(model.Port);
-                    if (antenna == null)
-                    {
-                        continue;
-                    }
-
-                    antenna.IsEnabled = model.IsEnabled;
-                    antenna.TxPowerInDbm = Normalize(model.TxPower);
-                    antenna.RxSensitivityInDbm = Normalize(model.RxSensitivity);
-                }
-
-                _reader.ApplySettings(settings);
-                DialogResult = DialogResult.OK;
-                Close();
-            }
-            catch (OctaneSdkException ex)
-            {
-                MessageBox.Show(this, $"应用天线配置失败：{ex.Message}", "通信错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"应用天线配置时发生意外：{ex.Message}", "系统错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally
-            {
-                buttonApply.Enabled = true;
-            }
-        }
 
         private void RefreshComboDataSources()
         {
@@ -343,7 +288,7 @@ namespace ImpinjR700
                 return 0.0;
             }
 
-            return Math.Round(value, 1, MidpointRounding.AwayFromZero);
+            return Math.Round(value * 2.0, MidpointRounding.AwayFromZero) / 2.0;
         }
 
         private static string FormatConnectionStatus(AntennaStatus status)
@@ -364,6 +309,64 @@ namespace ImpinjR700
             e.ThrowException = false;
         }
 
+        private void gridAntennas_CellContentClick(object? sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0)
+            {
+                return;
+            }
+
+            if (!ReferenceEquals(gridAntennas.Columns[e.ColumnIndex], columnSave))
+            {
+                return;
+            }
+
+            gridAntennas.EndEdit();
+
+            if (gridAntennas.Rows[e.RowIndex].DataBoundItem is not AntennaConfigViewModel model)
+            {
+                return;
+            }
+
+            ApplySingleConfiguration(model);
+        }
+
+        private void ApplySingleConfiguration(AntennaConfigViewModel model)
+        {
+            if (_reader == null)
+            {
+                MessageBox.Show(this, "当前读写器连接已失效，无法保存配置。", "保存提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+
+                var settings = _reader.QuerySettings();
+                var antenna = settings?.Antennas?.GetAntenna(model.Port);
+                if (antenna == null)
+                {
+                    MessageBox.Show(this, $"未找到端口 {model.Port} 的天线配置，请刷新后重试。", "保存提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                antenna.TxPowerInDbm = Normalize(model.TxPower);
+                antenna.RxSensitivityInDbm = Normalize(model.RxSensitivity);
+
+                _reader.ApplySettings(settings);
+
+                labelStatus.Text = $"端口 {model.Port} 的配置已单独保存。";
+            }
+            catch (OctaneSdkException ex)
+            {
+                MessageBox.Show(this, $"保存端口 {model.Port} 配置失败：{ex.Message}", "通信错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"保存端口 {model.Port} 配置时发生意外：{ex.Message}", "系统错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private sealed class AntennaConfigViewModel
         {
             public AntennaConfigViewModel(ushort port)
@@ -372,8 +375,6 @@ namespace ImpinjR700
             }
 
             public ushort Port { get; }
-
-            public bool IsEnabled { get; set; }
 
             public double TxPower { get; set; }
 

@@ -25,6 +25,11 @@ namespace ImpinjR700
         private bool _isReading;
         private CancellationTokenSource? _reconnectCts;
         private bool _isExporting;
+        private bool _suppressAntennaAutoSave;
+        private static readonly string AntennaSelectionFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "ImpinjR700",
+            "antenna-selection.txt");
 
         public Form1()
         {
@@ -83,6 +88,7 @@ namespace ImpinjR700
 
             checkedListAntennas.Enabled = false;
             checkedListAntennas.Items.Clear();
+            checkedListAntennas.ItemCheck += checkedListAntennas_ItemCheck;
 
             UpdateExportButtons();
             UpdateAntennaConfigurationButtonState();
@@ -174,7 +180,7 @@ namespace ImpinjR700
                     {
                         TryStopReader();
                     }
-                    if (_reader.IsConnected)
+                            if (_reader.IsConnected)
                     {
                         _reader.Disconnect();
                     }
@@ -272,12 +278,14 @@ namespace ImpinjR700
             {
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                EnableAllAntennaPorts();
                 UpdateAntennaConfigurationButtonState();
             }
             catch (Exception ex)
             {
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                EnableAllAntennaPorts();
                 UpdateAntennaConfigurationButtonState();
             }
         }
@@ -294,6 +302,7 @@ namespace ImpinjR700
 
             TryStopReader();
             _isReading = false;
+            
             UpdateStatus("已连接", Color.DarkGreen);
             buttonStart.Enabled = true;
             buttonStop.Enabled = false;
@@ -327,6 +336,238 @@ namespace ImpinjR700
                 AppendLog($"停止读取时发生意外：{ex.Message}");
             }
         }
+
+        private void WithAntennaAutoSaveSuppressed(Action action)
+        {
+            var previous = _suppressAntennaAutoSave;
+            _suppressAntennaAutoSave = true;
+            try
+            {
+                action();
+            }
+            finally
+            {
+                _suppressAntennaAutoSave = previous;
+            }
+        }
+
+        private static HashSet<ushort> LoadStoredAntennaSelection()
+        {
+            try
+            {
+                if (!File.Exists(AntennaSelectionFilePath))
+                {
+                    return new HashSet<ushort>();
+                }
+
+                var content = File.ReadAllText(AntennaSelectionFilePath).Trim();
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    return new HashSet<ushort>();
+                }
+
+                return content.Split(',')
+                    .Select(part => ushort.TryParse(part, out var value) ? (ushort?)value : null)
+                    .Where(value => value.HasValue)
+                    .Select(value => value!.Value)
+                    .ToHashSet();
+            }
+            catch
+            {
+                return new HashSet<ushort>();
+            }
+        }
+
+        private static void PersistAntennaSelection(IEnumerable<ushort> ports)
+        {
+            try
+            {
+                var directory = Path.GetDirectoryName(AntennaSelectionFilePath);
+                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                var content = string.Join(",", ports.OrderBy(port => port));
+                File.WriteAllText(AntennaSelectionFilePath, content);
+            }
+            catch
+            {
+                // 忽略持久化失败，避免影响主流程
+            }
+        }
+
+        /// <summary>
+        ///  恢复天线端口为全启用状态，用于读取结束后保持默认配置。
+        /// </summary>
+        private void EnableAllAntennaPorts()
+        {
+            try
+            {
+                UpdateCheckedListToAllSelected();
+
+                if (_reader == null || !_reader.IsConnected)
+                {
+                    return;
+                }
+
+                var settings = _reader.QuerySettings();
+                if (settings == null)
+                {
+                    return;
+                }
+
+                if (!EnsureAllPortsEnabled(settings))
+                {
+                    return;
+                }
+
+                _reader.ApplySettings(settings);
+                AppendLog("已恢复天线为全端口启用状态。");
+            }
+            catch (OctaneSdkException ex)
+            {
+                AppendLog($"恢复全端口启用失败：{ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"恢复全端口启用时发生意外：{ex.Message}");
+            }
+        }
+
+        private void UpdateCheckedListToAllSelected()
+        {
+            WithAntennaAutoSaveSuppressed(() =>
+            {
+                checkedListAntennas.BeginUpdate();
+                try
+                {
+                    for (var i = 0; i < checkedListAntennas.Items.Count; i++)
+                    {
+                        checkedListAntennas.SetItemChecked(i, true);
+                    }
+                }
+                finally
+                {
+                    checkedListAntennas.EndUpdate();
+                }
+            });
+        }
+
+        /// <summary>
+        ///  确保设置对象中的所有天线端口均被启用。
+        /// </summary>
+        private void checkedListAntennas_ItemCheck(object? sender, ItemCheckEventArgs e)
+        {
+            if (_suppressAntennaAutoSave)
+            {
+                return;
+            }
+
+            if (_isReading)
+            {
+                e.NewValue = e.CurrentValue;
+                MessageBox.Show(this, "读取进行中，无法修改天线启用状态，请先停止读取。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (_reader == null || !_reader.IsConnected)
+            {
+                return;
+            }
+
+            var isCurrentlyChecked = checkedListAntennas.GetItemChecked(e.Index);
+            var futureCount = checkedListAntennas.CheckedItems.Count
+                + (e.NewValue == CheckState.Checked && !isCurrentlyChecked ? 1 : 0)
+                - (e.NewValue == CheckState.Unchecked && isCurrentlyChecked ? 1 : 0);
+
+            if (futureCount <= 0)
+            {
+                e.NewValue = CheckState.Checked;
+                MessageBox.Show(this, "至少保留一个天线端口。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            BeginInvoke(new Action(AutoSaveAntennaSelection));
+        }
+
+        private void AutoSaveAntennaSelection()
+        {
+            if (_suppressAntennaAutoSave)
+            {
+                return;
+            }
+
+            if (_reader == null || !_reader.IsConnected)
+            {
+                return;
+            }
+
+            try
+            {
+                var selectedPorts = checkedListAntennas.CheckedItems
+                    .OfType<AntennaListItem>()
+                    .Select(item => item.Port)
+                    .Distinct()
+                    .ToList();
+
+                if (selectedPorts.Count == 0)
+                {
+                    return;
+                }
+
+                var currentSettings = _reader.QuerySettings();
+                var settings = _reader.QueryDefaultSettings();
+                CopyAntennaConfiguration(_reader, currentSettings, settings);
+                ConfigureReaderSettings(_reader, settings);
+                ApplyAntennaSelection(settings, selectedPorts);
+
+                if (!HasEnabledAntenna(settings))
+                {
+                    return;
+                }
+
+                _reader.ApplySettings(settings);
+                PersistAntennaSelection(selectedPorts);
+                AppendLog("天线启用状态已自动保存。");
+                UpdateAntennaConfigurationButtonState();
+            }
+            catch (OctaneSdkException ex)
+            {
+                AppendLog($"自动保存天线状态失败：{ex.Message}");
+                MessageBox.Show(this, $"自动保存天线状态失败：{ex.Message}", "通信错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"自动保存天线状态时发生意外：{ex.Message}");
+                MessageBox.Show(this, $"自动保存天线状态时发生意外：{ex.Message}", "系统错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        private static bool EnsureAllPortsEnabled(Settings settings)
+        {
+            if (settings?.Antennas == null)
+            {
+                return false;
+            }
+
+            var changed = false;
+            foreach (AntennaConfig antenna in settings.Antennas)
+            {
+                if (antenna == null)
+                {
+                    continue;
+                }
+
+                if (!antenna.IsEnabled)
+                {
+                    antenna.IsEnabled = true;
+                    changed = true;
+                }
+            }
+
+            return changed;
+        }
+
 
         /// <summary>
         ///  将读写器当前天线配置同步到目标设置，避免启用无效端口导致异常。
@@ -394,17 +635,14 @@ namespace ImpinjR700
                 var settings = reader.QueryDefaultSettings();
                 ConfigureReaderSettings(reader, settings);
 
+                if (EnsureAllPortsEnabled(settings))
+                {
+                    AppendLog("连接初始化：已恢复天线端口为全启用状态。");
+                }
+
                 if (!HasEnabledAntenna(settings))
                 {
-                    var enabledPort = EnableFirstAvailableAntenna(settings);
-                    if (enabledPort.HasValue)
-                    {
-                        AppendLog($"连接初始化：默认设置未启用天线，已自动启用端口 {enabledPort.Value}。");
-                    }
-                    else
-                    {
-                        AppendLog("连接初始化：未找到可启用的天线端口，请使用读写器管理工具手动启用。");
-                    }
+                    AppendLog("连接初始化：未检测到已启用的天线端口，请在读取前确认硬件连接。");
                 }
 
                 reader.ApplySettings(settings);
@@ -456,45 +694,7 @@ namespace ImpinjR700
 
 
 
-        private static ushort? EnableFirstAvailableAntenna(Settings settings)
 
-        {
-
-            if (settings?.Antennas == null)
-
-            {
-
-                return null;
-
-            }
-
-
-
-            foreach (AntennaConfig antenna in settings.Antennas)
-
-            {
-
-                if (antenna == null)
-
-                {
-
-                    continue;
-
-                }
-
-
-
-                antenna.IsEnabled = true;
-
-                return antenna.PortNumber;
-
-            }
-
-
-
-            return null;
-
-        }
 
 
 

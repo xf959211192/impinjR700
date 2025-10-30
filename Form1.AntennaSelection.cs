@@ -12,60 +12,77 @@ namespace ImpinjR700
                 .OfType<AntennaListItem>()
                 .Select(item => item.Port)
                 .ToHashSet();
+            var storedSelection = LoadStoredAntennaSelection();
 
-            checkedListAntennas.BeginUpdate();
-            try
+            WithAntennaAutoSaveSuppressed(() =>
             {
-                checkedListAntennas.Items.Clear();
-
-                if (reader == null || !reader.IsConnected)
+                checkedListAntennas.BeginUpdate();
+                try
                 {
-                    checkedListAntennas.Enabled = false;
-                    return;
-                }
+                    checkedListAntennas.Items.Clear();
 
-                var featureSet = reader.QueryFeatureSet();
-                var settings = reader.QuerySettings();
-                var maxPort = Math.Min((int)featureSet.AntennaCount, 32);
-                var hasChecked = false;
-
-                for (ushort port = 1; port <= maxPort; port++)
-                {
-                    var item = new AntennaListItem(port);
-                    var antenna = settings.Antennas.GetAntenna(port);
-                    var isEnabled = antenna?.IsEnabled ?? false;
-                    if (!isEnabled && previousSelection.Contains(port))
+                    if (reader == null || !reader.IsConnected)
                     {
-                        isEnabled = true;
+                        checkedListAntennas.Enabled = false;
+                        return;
                     }
 
-                    checkedListAntennas.Items.Add(item, isEnabled);
-                    hasChecked |= isEnabled;
-                }
+                    var featureSet = reader.QueryFeatureSet();
+                    var settings = reader.QuerySettings();
+                    var maxPort = Math.Min((int)featureSet.AntennaCount, 32);
+                    var hasChecked = false;
 
-                if (!hasChecked && checkedListAntennas.Items.Count > 0)
+                    for (ushort port = 1; port <= maxPort; port++)
+                    {
+                        var item = new AntennaListItem(port);
+                        var antenna = settings.Antennas.GetAntenna(port);
+                        var isEnabled = antenna?.IsEnabled ?? false;
+                        if (!isEnabled && (previousSelection.Contains(port) || storedSelection.Contains(port)))
+                        {
+                            isEnabled = true;
+                        }
+
+                        checkedListAntennas.Items.Add(item, isEnabled);
+                        hasChecked |= isEnabled;
+                    }
+
+                    if (!hasChecked && storedSelection.Count > 0)
+                    {
+                        foreach (ushort port in storedSelection)
+                        {
+                            var index = port - 1;
+                            if (index >= 0 && index < checkedListAntennas.Items.Count)
+                            {
+                                checkedListAntennas.SetItemChecked(index, true);
+                                hasChecked = true;
+                            }
+                        }
+                    }
+
+                    if (!hasChecked && checkedListAntennas.Items.Count > 0)
+                    {
+                        checkedListAntennas.SetItemChecked(0, true);
+                    }
+
+                    checkedListAntennas.Enabled = checkedListAntennas.Items.Count > 0;
+                }
+                catch (OctaneSdkException ex)
                 {
-                    checkedListAntennas.SetItemChecked(0, true);
+                    checkedListAntennas.Items.Clear();
+                    checkedListAntennas.Enabled = false;
+                    AppendLog($"天线选择刷新失败：{ex.Message}");
                 }
-
-                checkedListAntennas.Enabled = checkedListAntennas.Items.Count > 0;
-            }
-            catch (OctaneSdkException ex)
-            {
-                checkedListAntennas.Items.Clear();
-                checkedListAntennas.Enabled = false;
-                AppendLog($"天线选择刷新失败：{ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                checkedListAntennas.Items.Clear();
-                checkedListAntennas.Enabled = false;
-                AppendLog($"天线选择刷新时发生意外：{ex.Message}");
-            }
-            finally
-            {
-                checkedListAntennas.EndUpdate();
-            }
+                catch (Exception ex)
+                {
+                    checkedListAntennas.Items.Clear();
+                    checkedListAntennas.Enabled = false;
+                    AppendLog($"天线选择刷新时发生意外：{ex.Message}");
+                }
+                finally
+                {
+                    checkedListAntennas.EndUpdate();
+                }
+            });
         }
 
         private static void ApplyAntennaSelection(Settings settings, IReadOnlyCollection<ushort> selectedPorts)
