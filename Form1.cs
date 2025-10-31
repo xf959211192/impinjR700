@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -18,6 +18,7 @@ namespace ImpinjR700
         private ImpinjReader? _reader;
         private readonly BindingList<TagViewModel> _tagBinding = new();
         private readonly Dictionary<string, TagViewModel> _tagIndex = new();
+        private readonly Dictionary<string, List<PlotSample>> _plotSeriesData = new();
         private ListViewItem? _statUniqueTagsItem;
         private ListViewItem? _statTotalReadsItem;
         private long _totalReadCount;
@@ -26,6 +27,8 @@ namespace ImpinjR700
         private CancellationTokenSource? _reconnectCts;
         private bool _isExporting;
         private bool _suppressAntennaAutoSave;
+        private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromMinutes(5);
+        private const int MaxPlotPointsPerSeries = 500;
         private static readonly string AntennaSelectionFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ImpinjR700",
@@ -35,6 +38,29 @@ namespace ImpinjR700
         {
             InitializeComponent();
             InitializeUiState();
+        }
+
+        /// <summary>
+        ///  在 UI 线程处理标签数据。
+        /// </summary>
+        private void ConfigurePlot()
+        {
+            var plot = formsPlotRssi.Plot;
+            plot.Clear();
+            plot.Axes.DateTimeTicksBottom();
+            plot.XLabel("时间");
+            plot.YLabel("RSSI (dBm)");
+            plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
+            formsPlotRssi.Refresh();
+        }
+
+        /// <summary>
+        ///  清空曲线缓存并刷新画布。
+        /// </summary>
+        private void ResetPlotData()
+        {
+            _plotSeriesData.Clear();
+            ConfigurePlot();
         }
 
         /// <summary>
@@ -61,6 +87,7 @@ namespace ImpinjR700
             _tagBinding.ListChanged += (_, _) => UpdateExportButtons();
 
             ConfigureStatisticsView();
+            ResetPlotData();
 
             UpdateStatus("未连接", Color.DarkRed);
 
@@ -822,8 +849,14 @@ namespace ImpinjR700
         /// <summary>
         ///  在 UI 线程处理标签报告。
         /// </summary>
+
+        /// <summary>
+        ///  在 UI 线程处理标签数据。
+        /// </summary>
         private void ProcessTagReport(TagReport report)
         {
+            var plotUpdated = false;
+
             foreach (Tag tag in report)
             {
                 var epc = tag.Epc.ToString();
@@ -849,15 +882,84 @@ namespace ImpinjR700
                 }
                 _totalReadCount += reportedCount - viewModel.ReadCount;
                 viewModel.ReadCount = reportedCount;
+
+                plotUpdated |= AppendPlotSample(epc, viewModel.LastSeen, viewModel.Rssi);
+            }
+
+            if (plotUpdated)
+            {
+                RenderPlot();
             }
 
             UpdateStatistics();
             UpdateExportButtons();
         }
 
-        /// <summary>
-        ///  将时间戳转换为本地时间。
-        /// </summary>
+
+        private bool AppendPlotSample(string epc, DateTime timestamp, double rssi)
+        {
+            if (double.IsNaN(rssi) || double.IsInfinity(rssi))
+            {
+                return false;
+            }
+
+            if (timestamp == DateTime.MinValue)
+            {
+                timestamp = DateTime.Now;
+            }
+
+            if (!_plotSeriesData.TryGetValue(epc, out var samples))
+            {
+                samples = new List<PlotSample>();
+                _plotSeriesData[epc] = samples;
+            }
+
+            samples.Add(new PlotSample(timestamp, rssi));
+
+            if (PlotRetentionWindow > TimeSpan.Zero)
+            {
+                var cutoff = timestamp - PlotRetentionWindow;
+                samples.RemoveAll(sample => sample.Time < cutoff);
+            }
+
+            if (samples.Count > MaxPlotPointsPerSeries)
+            {
+                var excess = samples.Count - MaxPlotPointsPerSeries;
+                samples.RemoveRange(0, excess);
+            }
+
+            return true;
+        }
+
+        private void RenderPlot()
+        {
+            var plot = formsPlotRssi.Plot;
+            plot.Clear();
+
+            foreach (var entry in _plotSeriesData)
+            {
+                var samples = entry.Value;
+                if (samples.Count == 0)
+                {
+                    continue;
+                }
+
+                double[] xs = samples.Select(sample => sample.Time.ToOADate()).ToArray();
+                double[] ys = samples.Select(sample => sample.Rssi).ToArray();
+                var scatter = plot.Add.Scatter(xs, ys);
+                scatter.LegendText = entry.Key;
+                scatter.MarkerSize = 4;
+                scatter.LineWidth = 2;
+            }
+
+            plot.Axes.DateTimeTicksBottom();
+            plot.XLabel("时间");
+            plot.YLabel("RSSI (dBm)");
+            plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
+            plot.Axes.AutoScale();
+            formsPlotRssi.Refresh();
+        }
+
         private static DateTime SafeToLocal(ImpinjTimestamp timestamp)
         {
             return timestamp == null ? DateTime.Now : timestamp.LocalDateTime;
@@ -1044,6 +1146,7 @@ namespace ImpinjR700
             _tagIndex.Clear();
             _tagBinding.Clear();
             _totalReadCount = 0;
+            ResetPlotData();
             UpdateStatistics();
             UpdateExportButtons();
             AppendLog(logMessage);
@@ -1352,6 +1455,19 @@ namespace ImpinjR700
         /// <summary>
         ///  导出使用的标签快照模型。
         /// </summary>
+
+        private readonly struct PlotSample
+        {
+            public PlotSample(DateTime time, double rssi)
+            {
+                Time = time;
+                Rssi = rssi;
+            }
+
+            public DateTime Time { get; }
+            public double Rssi { get; }
+        }
+
         private sealed class TagSnapshot
         {
             public string Epc { get; init; } = string.Empty;

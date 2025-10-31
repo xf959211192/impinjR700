@@ -69,6 +69,8 @@ namespace ImpinjR700
             this.listStatistics = new System.Windows.Forms.ListView();
             this.columnStatName = new System.Windows.Forms.ColumnHeader();
             this.columnStatValue = new System.Windows.Forms.ColumnHeader();
+            this.tabChart = new System.Windows.Forms.TabPage();
+            this.formsPlotRssi = new ScottPlot.WinForms.FormsPlot();
             ((System.ComponentModel.ISupportInitialize)(this.splitMain)).BeginInit();
             this.splitMain.Panel1.SuspendLayout();
             this.splitMain.Panel2.SuspendLayout();
@@ -82,6 +84,7 @@ namespace ImpinjR700
             this.tabBottom.SuspendLayout();
             this.tabLog.SuspendLayout();
             this.tabStatistics.SuspendLayout();
+            this.tabChart.SuspendLayout();
             this.SuspendLayout();
             // 
             // splitMain
@@ -420,6 +423,7 @@ namespace ImpinjR700
             // 
             this.tabBottom.Controls.Add(this.tabLog);
             this.tabBottom.Controls.Add(this.tabStatistics);
+            this.tabBottom.Controls.Add(this.tabChart);
             this.tabBottom.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tabBottom.Location = new System.Drawing.Point(0, 0);
             this.tabBottom.Name = "tabBottom";
@@ -491,6 +495,26 @@ namespace ImpinjR700
             this.columnStatValue.Text = "当前值";
             this.columnStatValue.Width = 280;
             // 
+            // tabChart
+            // 
+            this.tabChart.Controls.Add(this.formsPlotRssi);
+            this.tabChart.Location = new System.Drawing.Point(4, 26);
+            this.tabChart.Name = "tabChart";
+            this.tabChart.Padding = new System.Windows.Forms.Padding(3);
+            this.tabChart.Size = new System.Drawing.Size(1092, 186);
+            this.tabChart.TabIndex = 2;
+            this.tabChart.Text = "信号曲线";
+            this.tabChart.UseVisualStyleBackColor = true;
+            // 
+            // formsPlotRssi
+            // 
+            this.formsPlotRssi.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.formsPlotRssi.Location = new System.Drawing.Point(3, 3);
+            this.formsPlotRssi.Margin = new System.Windows.Forms.Padding(0);
+            this.formsPlotRssi.Name = "formsPlotRssi";
+            this.formsPlotRssi.Size = new System.Drawing.Size(1086, 180);
+            this.formsPlotRssi.TabIndex = 0;
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 17F);
@@ -519,6 +543,7 @@ namespace ImpinjR700
             this.tabLog.ResumeLayout(false);
             this.tabLog.PerformLayout();
             this.tabStatistics.ResumeLayout(false);
+            this.tabChart.ResumeLayout(false);
             this.ResumeLayout(false);
 
         }
@@ -564,5 +589,7 @@ namespace ImpinjR700
         private System.Windows.Forms.ListView listStatistics;
         private System.Windows.Forms.ColumnHeader columnStatName;
         private System.Windows.Forms.ColumnHeader columnStatValue;
+        private System.Windows.Forms.TabPage tabChart;
+        private ScottPlot.WinForms.FormsPlot formsPlotRssi;
     }
 }
