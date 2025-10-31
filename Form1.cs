@@ -1253,6 +1253,34 @@ namespace ImpinjR700
                 .ToList();
         }
 
+        private List<PlotDataRow> CapturePlotSamplesSnapshot()
+        {
+            var rows = new List<PlotDataRow>();
+
+            foreach (var entry in _plotSeriesData)
+            {
+                var epc = entry.Key;
+                _tagIndex.TryGetValue(epc, out var viewModel);
+
+                foreach (var sample in entry.Value)
+                {
+                    rows.Add(new PlotDataRow(
+                        epc,
+                        sample.Time,
+                        sample.Rssi,
+                        viewModel?.Antenna ?? string.Empty,
+                        viewModel?.Phase ?? double.NaN,
+                        viewModel?.ReadCount ?? 0));
+                }
+            }
+
+            return rows
+                .OrderBy(r => r.Timestamp)
+                .ThenBy(r => r.Epc, StringComparer.Ordinal)
+                .ToList();
+        }
+
+
         /// <summary>
         ///  执行 CSV 导出。
         /// </summary>
@@ -1277,11 +1305,12 @@ namespace ImpinjR700
                 return;
             }
 
-            var snapshot = CaptureTagSnapshots();
+            var summary = CaptureTagSnapshots();
+            var samples = CapturePlotSamplesSnapshot();
             SetExportInProgress(true);
             try
             {
-                await Task.Run(() => WriteCsv(dialog.FileName, snapshot));
+                await Task.Run(() => WriteCsv(dialog.FileName, summary, samples));
                 AppendLog($"已导出 CSV：{dialog.FileName}");
                 MessageBox.Show(this, "CSV 导出完成。", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -1320,11 +1349,12 @@ namespace ImpinjR700
                 return;
             }
 
-            var snapshot = CaptureTagSnapshots();
+            var summary = CaptureTagSnapshots();
+            var samples = CapturePlotSamplesSnapshot();
             SetExportInProgress(true);
             try
             {
-                await Task.Run(() => WriteExcel(dialog.FileName, snapshot));
+                await Task.Run(() => WriteExcel(dialog.FileName, summary, samples));
                 AppendLog($"已导出 Excel：{dialog.FileName}");
                 MessageBox.Show(this, "Excel 导出完成。", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -1342,7 +1372,10 @@ namespace ImpinjR700
         /// <summary>
         ///  写入 CSV 文件。
         /// </summary>
-        private static void WriteCsv(string filePath, IReadOnlyList<TagSnapshot> data)
+        private static void WriteCsv(
+            string filePath,
+            IReadOnlyList<TagSnapshot> summary,
+            IReadOnlyList<PlotDataRow> samples)
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
@@ -1351,9 +1384,10 @@ namespace ImpinjR700
             }
 
             var builder = new StringBuilder();
+            builder.AppendLine("# Tag Summary");
             builder.AppendLine("EPC,天线,RSSI (dBm),相位 (°),读取次数,首次读取时间,最后读取时间");
 
-            foreach (var item in data)
+            foreach (var item in summary)
             {
                 builder.Append(EscapeCsvValue(item.Epc)).Append(',');
                 builder.Append(EscapeCsvValue(item.Antenna)).Append(',');
@@ -1362,6 +1396,23 @@ namespace ImpinjR700
                 builder.Append(item.ReadCount.ToString()).Append(',');
                 builder.Append(EscapeCsvValue(item.FirstSeen == DateTime.MinValue ? string.Empty : item.FirstSeen.ToString("yyyy-MM-dd HH:mm:ss.fff"))).Append(',');
                 builder.AppendLine(EscapeCsvValue(item.LastSeen == DateTime.MinValue ? string.Empty : item.LastSeen.ToString("yyyy-MM-dd HH:mm:ss.fff")));
+            }
+
+            if (samples.Count > 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine("# RSSI Samples");
+                builder.AppendLine("EPC,时间,RSSI (dBm),天线,相位 (°),读取次数");
+
+                foreach (var sample in samples)
+                {
+                    builder.Append(EscapeCsvValue(sample.Epc)).Append(',');
+                    builder.Append(EscapeCsvValue(sample.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff"))).Append(',');
+                    builder.Append(sample.Rssi.ToString("F1")).Append(',');
+                    builder.Append(EscapeCsvValue(sample.Antenna)).Append(',');
+                    builder.Append(double.IsNaN(sample.Phase) ? string.Empty : sample.Phase.ToString("F1")).Append(',');
+                    builder.AppendLine(sample.ReadCount.ToString());
+                }
             }
 
             File.WriteAllText(filePath, builder.ToString(), new UTF8Encoding(true));
@@ -1388,7 +1439,10 @@ namespace ImpinjR700
         /// <summary>
         ///  写入 Excel 文件。
         /// </summary>
-        private static void WriteExcel(string filePath, IReadOnlyList<TagSnapshot> data)
+        private static void WriteExcel(
+            string filePath,
+            IReadOnlyList<TagSnapshot> summary,
+            IReadOnlyList<PlotDataRow> samples)
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
@@ -1397,29 +1451,55 @@ namespace ImpinjR700
             }
 
             using var workbook = new XLWorkbook();
-            var worksheet = workbook.Worksheets.Add("标签数据");
+            var summarySheet = workbook.Worksheets.Add("Tag Summary");
 
-            string[] headers = { "EPC", "天线", "RSSI (dBm)", "相位 (°)", "读取次数", "首次读取时间", "最后读取时间" };
-            for (var col = 0; col < headers.Length; col++)
+            string[] summaryHeaders = { "EPC", "天线", "RSSI (dBm)", "相位 (°)", "读取次数", "首次读取时间", "最后读取时间" };
+            for (var col = 0; col < summaryHeaders.Length; col++)
             {
-                worksheet.Cell(1, col + 1).Value = headers[col];
-                worksheet.Cell(1, col + 1).Style.Font.SetBold();
+                summarySheet.Cell(1, col + 1).Value = summaryHeaders[col];
+                summarySheet.Cell(1, col + 1).Style.Font.SetBold();
             }
 
             var row = 2;
-            foreach (var item in data)
+            foreach (var item in summary)
             {
-                worksheet.Cell(row, 1).Value = item.Epc;
-                worksheet.Cell(row, 2).Value = item.Antenna;
-                worksheet.Cell(row, 3).Value = item.Rssi;
-                worksheet.Cell(row, 4).Value = double.IsNaN(item.Phase) ? string.Empty : item.Phase;
-                worksheet.Cell(row, 5).Value = item.ReadCount;
-                worksheet.Cell(row, 6).Value = item.FirstSeen == DateTime.MinValue ? string.Empty : item.FirstSeen.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                worksheet.Cell(row, 7).Value = item.LastSeen == DateTime.MinValue ? string.Empty : item.LastSeen.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                summarySheet.Cell(row, 1).Value = item.Epc;
+                summarySheet.Cell(row, 2).Value = item.Antenna;
+                summarySheet.Cell(row, 3).Value = item.Rssi;
+                summarySheet.Cell(row, 4).Value = double.IsNaN(item.Phase) ? string.Empty : item.Phase;
+                summarySheet.Cell(row, 5).Value = item.ReadCount;
+                summarySheet.Cell(row, 6).Value = item.FirstSeen == DateTime.MinValue ? string.Empty : item.FirstSeen.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                summarySheet.Cell(row, 7).Value = item.LastSeen == DateTime.MinValue ? string.Empty : item.LastSeen.ToString("yyyy-MM-dd HH:mm:ss.fff");
                 row++;
             }
 
-            worksheet.Columns().AdjustToContents();
+            summarySheet.Columns().AdjustToContents();
+
+            if (samples.Count > 0)
+            {
+                var sampleSheet = workbook.Worksheets.Add("RSSI Samples");
+                string[] sampleHeaders = { "EPC", "时间", "RSSI (dBm)", "天线", "相位 (°)", "读取次数" };
+                for (var col = 0; col < sampleHeaders.Length; col++)
+                {
+                    sampleSheet.Cell(1, col + 1).Value = sampleHeaders[col];
+                    sampleSheet.Cell(1, col + 1).Style.Font.SetBold();
+                }
+
+                row = 2;
+                foreach (var sample in samples)
+                {
+                    sampleSheet.Cell(row, 1).Value = sample.Epc;
+                    sampleSheet.Cell(row, 2).Value = sample.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                    sampleSheet.Cell(row, 3).Value = sample.Rssi;
+                    sampleSheet.Cell(row, 4).Value = sample.Antenna;
+                    sampleSheet.Cell(row, 5).Value = double.IsNaN(sample.Phase) ? string.Empty : sample.Phase;
+                    sampleSheet.Cell(row, 6).Value = sample.ReadCount;
+                    row++;
+                }
+
+                sampleSheet.Columns().AdjustToContents();
+            }
+
             workbook.SaveAs(filePath);
         }
 
@@ -1451,6 +1531,27 @@ namespace ImpinjR700
         /// <summary>
         ///  导出使用的标签快照模型。
         /// </summary>
+
+
+        private sealed class PlotDataRow
+        {
+            public PlotDataRow(string epc, DateTime timestamp, double rssi, string antenna, double phase, ushort readCount)
+            {
+                Epc = epc;
+                Timestamp = timestamp;
+                Rssi = rssi;
+                Antenna = antenna;
+                Phase = phase;
+                ReadCount = readCount;
+            }
+
+            public string Epc { get; }
+            public DateTime Timestamp { get; }
+            public double Rssi { get; }
+            public string Antenna { get; }
+            public double Phase { get; }
+            public ushort ReadCount { get; }
+        }
 
         private readonly struct PlotSample
         {
