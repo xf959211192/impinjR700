@@ -380,9 +380,9 @@ namespace ImpinjR700
             }
         }
 
-        private void PopulateOfflineAntennaSelection()
+        private void ApplyAntennaSelectionToUi(IEnumerable<ushort> enabledPorts)
         {
-            var storedSelection = LoadStoredAntennaSelection();
+            var enabledSet = new HashSet<ushort>(enabledPorts ?? Enumerable.Empty<ushort>());
             WithAntennaAutoSaveSuppressed(() =>
             {
                 checkedListAntennas.BeginUpdate();
@@ -392,13 +392,7 @@ namespace ImpinjR700
                     for (ushort port = 1; port <= 4; port++)
                     {
                         var item = new AntennaListItem(port);
-                        var isChecked = storedSelection.Contains(port);
-                        checkedListAntennas.Items.Add(item, isChecked);
-                    }
-
-                    if (checkedListAntennas.Items.Count > 0 && checkedListAntennas.CheckedItems.Count == 0)
-                    {
-                        checkedListAntennas.SetItemChecked(0, true);
+                        checkedListAntennas.Items.Add(item, enabledSet.Contains(port));
                     }
                 }
                 finally
@@ -406,6 +400,13 @@ namespace ImpinjR700
                     checkedListAntennas.EndUpdate();
                 }
             });
+        }
+
+        private void PopulateOfflineAntennaSelection()
+        {
+            var storedSelection = LoadStoredAntennaSelection();
+            ApplyAntennaSelectionToUi(storedSelection);
+            AppendLog($"初始化天线状态（离线）：{FormatAntennaSelection(storedSelection)}");
         }
 
         private static void PersistAntennaSelection(IEnumerable<ushort> ports)
@@ -664,29 +665,39 @@ namespace ImpinjR700
 
             try
             {
-                var settings = reader.QuerySettings();
-                var storedSelection = LoadStoredAntennaSelection();
-                var appliedStoredSelection = false;
+                Settings settings;
 
-                if (!HasEnabledAntenna(settings) && storedSelection.Count > 0)
+                try
                 {
-                    ApplyAntennaSelection(settings, storedSelection);
-                    appliedStoredSelection = HasEnabledAntenna(settings);
+                    settings = reader.QuerySettings();
+                    AppendLog("连接初始化：加载持久化配置成功。");
                 }
-
-                if (appliedStoredSelection)
+                catch (OctaneSdkException ex) when (ex.Message.Contains("not been configured"))
                 {
+                    AppendLog("连接初始化：检测到未配置设备，初始化中...");
+                    settings = reader.QueryDefaultSettings();
+
+                    var ant = settings.Antennas?.GetAntenna(1);
+                    if (ant != null)
+                    {
+                        ant.IsEnabled = true;
+                        ant.TxPowerInDbm = 30;
+                    }
+
                     reader.ApplySettings(settings);
-                    AppendLog("连接初始化：保留读写器现有设置，并恢复本地天线选择。");
+                    reader.SaveSettings();
+
+                    AppendLog("连接初始化：默认配置已写入保存。");
                 }
-                else
-                {
-                    AppendLog("连接初始化：保留读写器现有设置，无需下发配置。");
-                }
-            }
-            catch (OctaneSdkException ex)
-            {
-                AppendLog($"连接初始化失败：{ex.Message}");
+
+                ConfigureReaderSettings(reader, settings);
+                reader.ApplySettings(settings);
+
+                var enabledPorts = ReadEnabledPorts(settings).ToList();
+                PersistAntennaSelection(enabledPorts);
+                ApplyAntennaSelectionToUi(enabledPorts);
+
+                AppendLog("连接初始化：配置应用完成。");
             }
             catch (Exception ex)
             {
@@ -694,6 +705,24 @@ namespace ImpinjR700
             }
         }
 
+        private static string FormatAntennaSelection(IEnumerable<ushort> ports)
+        {
+            var list = ports?.OrderBy(port => port).ToList() ?? new List<ushort>();
+            return list.Count == 0 ? "无启用端口" : string.Join(",", list.Select(port => $"天线{port}"));
+        }
+
+        private static IEnumerable<ushort> ReadEnabledPorts(Settings settings)
+        {
+            if (settings?.Antennas == null)
+            {
+                return Enumerable.Empty<ushort>();
+            }
+
+            return settings.Antennas
+                .OfType<AntennaConfig>()
+                .Where(antenna => antenna != null && antenna.IsEnabled)
+                .Select(antenna => antenna.PortNumber);
+        }
         private static bool HasEnabledAntenna(Settings settings)
 
         {
