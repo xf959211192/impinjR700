@@ -41,7 +41,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  在 UI 线程处理标签数据。
+        ///  初始化 RSSI 曲线基础样式。
         /// </summary>
         private void ConfigurePlot()
         {
@@ -952,10 +952,6 @@ namespace ImpinjR700
                 scatter.LineWidth = 2;
             }
 
-            plot.Axes.DateTimeTicksBottom();
-            plot.XLabel("时间");
-            plot.YLabel("RSSI (dBm)");
-            plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
             plot.Axes.AutoScale();
             formsPlotRssi.Refresh();
         }
