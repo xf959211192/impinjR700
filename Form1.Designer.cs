@@ -42,6 +42,7 @@ namespace ImpinjR700
             this.textReaderIp = new System.Windows.Forms.TextBox();
             this.labelReaderIp = new System.Windows.Forms.Label();
             this.groupControl = new System.Windows.Forms.GroupBox();
+            this.checkPlotSelectionOnly = new System.Windows.Forms.CheckBox();
             this.buttonAntennaConfig = new System.Windows.Forms.Button();
             this.checkedListAntennas = new System.Windows.Forms.CheckedListBox();
             this.labelAntennaSelection = new System.Windows.Forms.Label();
@@ -66,9 +67,12 @@ namespace ImpinjR700
             this.tabLog = new System.Windows.Forms.TabPage();
             this.textLog = new System.Windows.Forms.TextBox();
             this.tabStatistics = new System.Windows.Forms.TabPage();
+            this.tableStats = new System.Windows.Forms.TableLayoutPanel();
             this.listStatistics = new System.Windows.Forms.ListView();
             this.columnStatName = new System.Windows.Forms.ColumnHeader();
             this.columnStatValue = new System.Windows.Forms.ColumnHeader();
+            this.groupEpcSelection = new System.Windows.Forms.GroupBox();
+            this.checkedListEpcSelection = new System.Windows.Forms.CheckedListBox();
             this.tabChart = new System.Windows.Forms.TabPage();
             this.formsPlotRssi = new ScottPlot.WinForms.FormsPlot();
             ((System.ComponentModel.ISupportInitialize)(this.splitMain)).BeginInit();
@@ -84,6 +88,8 @@ namespace ImpinjR700
             this.tabBottom.SuspendLayout();
             this.tabLog.SuspendLayout();
             this.tabStatistics.SuspendLayout();
+            this.tableStats.SuspendLayout();
+            this.groupEpcSelection.SuspendLayout();
             this.tabChart.SuspendLayout();
             this.SuspendLayout();
             // 
@@ -102,7 +108,7 @@ namespace ImpinjR700
             // 
             this.splitMain.Panel2.Controls.Add(this.tabBottom);
             this.splitMain.Size = new System.Drawing.Size(1100, 720);
-            this.splitMain.SplitterDistance = 500;
+            this.splitMain.SplitterDistance = 360;
             this.splitMain.TabIndex = 0;
             // 
             // tableTop
@@ -234,9 +240,19 @@ namespace ImpinjR700
             this.groupControl.TabStop = false;
             this.groupControl.Text = "读取控制";
             // 
+            // checkPlotSelectionOnly
+            // 
+            this.checkPlotSelectionOnly.AutoSize = true;
+            this.checkPlotSelectionOnly.Location = new System.Drawing.Point(150, 24);
+            this.checkPlotSelectionOnly.Name = "checkPlotSelectionOnly";
+            this.checkPlotSelectionOnly.Size = new System.Drawing.Size(138, 21);
+            this.checkPlotSelectionOnly.TabIndex = 6;
+            this.checkPlotSelectionOnly.Text = "仅绘制选中标签";
+            this.checkPlotSelectionOnly.UseVisualStyleBackColor = true;
+            // 
             // buttonAntennaConfig
             // 
-            this.buttonAntennaConfig.Location = new System.Drawing.Point(200, 20);
+            this.buttonAntennaConfig.Location = new System.Drawing.Point(200, 48);
             this.buttonAntennaConfig.Name = "buttonAntennaConfig";
             this.buttonAntennaConfig.Size = new System.Drawing.Size(120, 30);
             this.buttonAntennaConfig.TabIndex = 2;
@@ -265,7 +281,7 @@ namespace ImpinjR700
             // checkAutoReconnect
             // 
             this.checkAutoReconnect.AutoSize = true;
-            this.checkAutoReconnect.Location = new System.Drawing.Point(200, 132);
+            this.checkAutoReconnect.Location = new System.Drawing.Point(200, 138);
             this.checkAutoReconnect.Name = "checkAutoReconnect";
             this.checkAutoReconnect.Size = new System.Drawing.Size(138, 21);
             this.checkAutoReconnect.TabIndex = 5;
@@ -274,7 +290,7 @@ namespace ImpinjR700
             // 
             // buttonStop
             // 
-            this.buttonStop.Location = new System.Drawing.Point(200, 96);
+            this.buttonStop.Location = new System.Drawing.Point(200, 118);
             this.buttonStop.Name = "buttonStop";
             this.buttonStop.Size = new System.Drawing.Size(120, 30);
             this.buttonStop.TabIndex = 4;
@@ -283,7 +299,7 @@ namespace ImpinjR700
             // 
             // buttonStart
             // 
-            this.buttonStart.Location = new System.Drawing.Point(200, 60);
+            this.buttonStart.Location = new System.Drawing.Point(200, 84);
             this.buttonStart.Name = "buttonStart";
             this.buttonStart.Size = new System.Drawing.Size(120, 30);
             this.buttonStart.TabIndex = 3;
@@ -293,6 +309,7 @@ namespace ImpinjR700
             // groupExport
             // 
             this.groupExport.Controls.Add(this.buttonClear);
+            this.groupExport.Controls.Add(this.checkPlotSelectionOnly);
             this.groupExport.Controls.Add(this.buttonExportExcel);
             this.groupExport.Controls.Add(this.buttonExportCsv);
             this.groupExport.Controls.Add(this.labelRecordCountValue);
@@ -458,7 +475,7 @@ namespace ImpinjR700
             // 
             // tabStatistics
             // 
-            this.tabStatistics.Controls.Add(this.listStatistics);
+            this.tabStatistics.Controls.Add(this.tableStats);
             this.tabStatistics.Location = new System.Drawing.Point(4, 26);
             this.tabStatistics.Name = "tabStatistics";
             this.tabStatistics.Padding = new System.Windows.Forms.Padding(3);
@@ -466,6 +483,21 @@ namespace ImpinjR700
             this.tabStatistics.TabIndex = 1;
             this.tabStatistics.Text = "统计信息";
             this.tabStatistics.UseVisualStyleBackColor = true;
+            // 
+            // tableStats
+            // 
+            this.tableStats.ColumnCount = 1;
+            this.tableStats.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100F));
+            this.tableStats.Controls.Add(this.listStatistics, 0, 0);
+            this.tableStats.Controls.Add(this.groupEpcSelection, 0, 1);
+            this.tableStats.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.tableStats.Location = new System.Drawing.Point(3, 3);
+            this.tableStats.Name = "tableStats";
+            this.tableStats.RowCount = 2;
+            this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 100F));
+            this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100F));
+            this.tableStats.Size = new System.Drawing.Size(1086, 180);
+            this.tableStats.TabIndex = 1;
             // 
             // listStatistics
             // 
@@ -480,10 +512,33 @@ namespace ImpinjR700
             this.listStatistics.Location = new System.Drawing.Point(3, 3);
             this.listStatistics.MultiSelect = false;
             this.listStatistics.Name = "listStatistics";
-            this.listStatistics.Size = new System.Drawing.Size(1086, 180);
+            this.listStatistics.Size = new System.Drawing.Size(1080, 104);
             this.listStatistics.TabIndex = 0;
             this.listStatistics.UseCompatibleStateImageBehavior = false;
             this.listStatistics.View = System.Windows.Forms.View.Details;
+            // 
+            // groupEpcSelection
+            // 
+            this.groupEpcSelection.Controls.Add(this.checkedListEpcSelection);
+            this.groupEpcSelection.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.groupEpcSelection.Location = new System.Drawing.Point(3, 113);
+            this.groupEpcSelection.Name = "groupEpcSelection";
+            this.groupEpcSelection.Size = new System.Drawing.Size(1080, 64);
+            this.groupEpcSelection.TabIndex = 1;
+            this.groupEpcSelection.TabStop = false;
+            this.groupEpcSelection.Text = "EPC 筛选（用于绘图）";
+            // 
+            // checkedListEpcSelection
+            // 
+            this.checkedListEpcSelection.CheckOnClick = true;
+            this.checkedListEpcSelection.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.checkedListEpcSelection.HorizontalScrollbar = true;
+            this.checkedListEpcSelection.FormattingEnabled = true;
+            this.checkedListEpcSelection.IntegralHeight = false;
+            this.checkedListEpcSelection.Location = new System.Drawing.Point(3, 19);
+            this.checkedListEpcSelection.Name = "checkedListEpcSelection";
+            this.checkedListEpcSelection.Size = new System.Drawing.Size(1074, 42);
+            this.checkedListEpcSelection.TabIndex = 0;
             // 
             // columnStatName
             // 
@@ -543,6 +598,9 @@ namespace ImpinjR700
             this.tabLog.ResumeLayout(false);
             this.tabLog.PerformLayout();
             this.tabStatistics.ResumeLayout(false);
+            this.tableStats.ResumeLayout(false);
+            this.groupEpcSelection.ResumeLayout(false);
+            this.groupEpcSelection.PerformLayout();
             this.tabChart.ResumeLayout(false);
             this.ResumeLayout(false);
 
@@ -562,6 +620,7 @@ namespace ImpinjR700
         private System.Windows.Forms.TextBox textReaderIp;
         private System.Windows.Forms.Label labelReaderIp;
         private System.Windows.Forms.GroupBox groupControl;
+        private System.Windows.Forms.CheckBox checkPlotSelectionOnly;
         private System.Windows.Forms.Button buttonAntennaConfig;
         private System.Windows.Forms.CheckedListBox checkedListAntennas;
         private System.Windows.Forms.Label labelAntennaSelection;
@@ -586,9 +645,12 @@ namespace ImpinjR700
         private System.Windows.Forms.TabPage tabLog;
         private System.Windows.Forms.TextBox textLog;
         private System.Windows.Forms.TabPage tabStatistics;
+        private System.Windows.Forms.TableLayoutPanel tableStats;
         private System.Windows.Forms.ListView listStatistics;
         private System.Windows.Forms.ColumnHeader columnStatName;
         private System.Windows.Forms.ColumnHeader columnStatValue;
+        private System.Windows.Forms.GroupBox groupEpcSelection;
+        private System.Windows.Forms.CheckedListBox checkedListEpcSelection;
         private System.Windows.Forms.TabPage tabChart;
         private ScottPlot.WinForms.FormsPlot formsPlotRssi;
     }

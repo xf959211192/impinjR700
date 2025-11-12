@@ -16,9 +16,11 @@ namespace ImpinjR700
     public partial class Form1 : Form
     {
         private ImpinjReader? _reader;
-        private readonly BindingList<TagViewModel> _tagBinding = new();
+        private readonly List<TagReadRecord> _renderCache = new();
+        private readonly object _cacheLock = new();
+        private readonly BindingList<TagReadRecord> _readHistoryBinding;
         private readonly Dictionary<string, TagViewModel> _tagIndex = new();
-        private readonly Dictionary<string, List<PlotSample>> _plotSeriesData = new();
+        private DateTime? _plotStartTime;
         private ListViewItem? _statUniqueTagsItem;
         private ListViewItem? _statTotalReadsItem;
         private long _totalReadCount;
@@ -29,14 +31,27 @@ namespace ImpinjR700
         private bool _suppressAntennaAutoSave;
         private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromMinutes(5);
         private const int MaxPlotPointsPerSeries = 500;
+        private static readonly TimeSpan PlotRenderThrottleInterval = TimeSpan.FromMilliseconds(150);
+        private const string PlotFontName = "Microsoft YaHei";
         private static readonly string AntennaSelectionFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ImpinjR700",
             "antenna-selection.txt");
+        private readonly System.Windows.Forms.Timer _plotRenderTimer;
+        private bool _plotRenderPending;
+        private DateTime _lastPlotRenderTime = DateTime.MinValue;
+        private bool _readHistorySortDescending = true;
+        private bool _isUpdatingEpcSelection;
 
         public Form1()
         {
             InitializeComponent();
+            _readHistoryBinding = new BindingList<TagReadRecord>(_renderCache);
+            _plotRenderTimer = new System.Windows.Forms.Timer
+            {
+                Interval = (int)PlotRenderThrottleInterval.TotalMilliseconds
+            };
+            _plotRenderTimer.Tick += PlotRenderTimer_Tick;
             InitializeUiState();
         }
 
@@ -47,19 +62,38 @@ namespace ImpinjR700
         {
             var plot = formsPlotRssi.Plot;
             plot.Clear();
-            plot.Axes.DateTimeTicksBottom();
-            plot.XLabel("时间");
-            plot.YLabel("RSSI (dBm)");
-            plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
+
+            plot.Axes.Bottom.Label.Text = "TIME  (s)";
+            plot.Axes.Bottom.Label.FontName = PlotFontName;
+            plot.Axes.Bottom.TickLabelStyle.FontName = PlotFontName;
+
+            plot.Axes.Left.Label.Text = "RSSI (dBm)";
+            plot.Axes.Left.Label.FontName = PlotFontName;
+            plot.Axes.Left.TickLabelStyle.FontName = PlotFontName;
+
+            var legend = plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
+            if (legend is not null)
+            {
+                legend.FontName = PlotFontName;
+            }
+
             formsPlotRssi.Refresh();
         }
 
         /// <summary>
         ///  清空曲线缓存并刷新画布。
         /// </summary>
+        private void SplitMain_SizeChanged(object? sender, EventArgs e)
+        {
+            if (splitMain.Height > 0)
+            {
+                splitMain.SplitterDistance = splitMain.Height / 2;
+            }
+        }
+
         private void ResetPlotData()
         {
-            _plotSeriesData.Clear();
+            _plotStartTime = null;
             ConfigurePlot();
         }
 
@@ -75,19 +109,30 @@ namespace ImpinjR700
             buttonExportExcel.Enabled = false;
 
             gridTags.AutoGenerateColumns = false;
-            columnEpc.DataPropertyName = nameof(TagViewModel.Epc);
-            columnAntenna.DataPropertyName = nameof(TagViewModel.Antenna);
-            columnRssi.DataPropertyName = nameof(TagViewModel.RssiDisplay);
-            columnPhase.DataPropertyName = nameof(TagViewModel.PhaseDisplay);
-            columnReadCount.DataPropertyName = nameof(TagViewModel.ReadCountDisplay);
-            columnFirstSeen.DataPropertyName = nameof(TagViewModel.FirstSeenDisplay);
-            columnLastSeen.DataPropertyName = nameof(TagViewModel.LastSeenDisplay);
-            gridTags.DataSource = _tagBinding;
+            columnEpc.DataPropertyName = nameof(TagReadRecord.Epc);
+            columnAntenna.DataPropertyName = nameof(TagReadRecord.Antenna);
+            columnRssi.DataPropertyName = nameof(TagReadRecord.RssiDisplay);
+            columnPhase.DataPropertyName = nameof(TagReadRecord.PhaseDisplay);
+            columnFirstSeen.DataPropertyName = nameof(TagReadRecord.FirstSeenDisplay);
+            columnLastSeen.DataPropertyName = nameof(TagReadRecord.LastSeenDisplay);
+            gridTags.DataSource = _readHistoryBinding;
+            columnLastSeen.DisplayIndex = 0;
+            columnEpc.DisplayIndex = 1;
+            columnAntenna.DisplayIndex = 2;
+            columnRssi.DisplayIndex = 3;
+            columnPhase.DisplayIndex = 4;
+            columnFirstSeen.DisplayIndex = 5;
+            columnReadCount.Visible = false;
+            gridTags.ClearSelection();
 
-            _tagBinding.ListChanged += (_, _) => UpdateExportButtons();
+            _readHistoryBinding.ListChanged += (_, _) => UpdateExportButtons();
+            checkedListEpcSelection.ItemCheck += CheckedListEpcSelection_ItemCheck;
 
             ConfigureStatisticsView();
             ResetPlotData();
+
+            splitMain.SizeChanged += SplitMain_SizeChanged;
+            SplitMain_SizeChanged(null, EventArgs.Empty);
 
             UpdateStatus("未连接", Color.DarkRed);
 
@@ -107,10 +152,13 @@ namespace ImpinjR700
                     CancelReconnect();
                 }
             };
+            checkPlotSelectionOnly.CheckedChanged += (_, _) => OnPlotSelectionFilterChanged();
+            RefreshEpcSelectionList();
             FormClosing += (_, _) =>
             {
                 CancelReconnect();
                 Disconnect();
+                _plotRenderTimer.Stop();
             };
 
             checkedListAntennas.Enabled = true;
@@ -209,7 +257,7 @@ namespace ImpinjR700
                     {
                         TryStopReader();
                     }
-                            if (_reader.IsConnected)
+                    if (_reader.IsConnected)
                     {
                         _reader.Disconnect();
                     }
@@ -331,7 +379,7 @@ namespace ImpinjR700
 
             TryStopReader();
             _isReading = false;
-            
+
             UpdateStatus("已连接", Color.DarkGreen);
             buttonStart.Enabled = true;
             buttonStop.Enabled = false;
@@ -856,21 +904,25 @@ namespace ImpinjR700
         private void ProcessTagReport(TagReport report)
         {
             var plotUpdated = false;
+            var epcListChanged = false;
 
             foreach (Tag tag in report)
             {
                 var epc = tag.Epc.ToString();
+                var firstSeen = SafeToLocal(tag.FirstSeenTime);
+                var lastSeen = SafeToLocal(tag.LastSeenTime);
+
                 if (!_tagIndex.TryGetValue(epc, out var viewModel))
                 {
                     viewModel = new TagViewModel(epc)
                     {
-                        FirstSeen = SafeToLocal(tag.FirstSeenTime)
+                        FirstSeen = firstSeen
                     };
                     _tagIndex[epc] = viewModel;
-                    _tagBinding.Add(viewModel);
+                    epcListChanged = true;
                 }
 
-                viewModel.LastSeen = SafeToLocal(tag.LastSeenTime);
+                viewModel.LastSeen = lastSeen;
                 viewModel.Antenna = FormatAntenna(tag.AntennaPortNumber);
                 viewModel.Rssi = tag.PeakRssiInDbm;
                 viewModel.Phase = ExtractPhaseDegrees(tag);
@@ -883,60 +935,264 @@ namespace ImpinjR700
                 _totalReadCount += reportedCount - viewModel.ReadCount;
                 viewModel.ReadCount = reportedCount;
 
-                plotUpdated |= AppendPlotSample(epc, viewModel.LastSeen, viewModel.Rssi);
+                AddReadHistoryRecord(new TagReadRecord(
+                    epc,
+                    tag.AntennaPortNumber,
+                    FormatAntenna(tag.AntennaPortNumber),
+                    tag.PeakRssiInDbm,
+                    viewModel.Phase,
+                    reportedCount,
+                    firstSeen,
+                    lastSeen));
+
+                plotUpdated = true;
             }
 
             if (plotUpdated)
             {
-                RenderPlot();
+                RequestPlotRender();
+            }
+
+            if (epcListChanged)
+            {
+                RefreshEpcSelectionList();
             }
 
             UpdateStatistics();
             UpdateExportButtons();
         }
 
-
-        private bool AppendPlotSample(string epc, DateTime timestamp, double rssi)
+        private void OnPlotSelectionFilterChanged()
         {
-            if (double.IsNaN(rssi) || double.IsInfinity(rssi))
+            if (!checkPlotSelectionOnly.Checked)
             {
-                return false;
+                gridTags.ClearSelection();
+                ClearEpcSelection();
             }
 
-            if (timestamp == DateTime.MinValue)
-            {
-                timestamp = DateTime.Now;
-            }
-
-            if (!_plotSeriesData.TryGetValue(epc, out var samples))
-            {
-                samples = new List<PlotSample>();
-                _plotSeriesData[epc] = samples;
-            }
-
-            samples.Add(new PlotSample(timestamp, rssi));
-
-            if (PlotRetentionWindow > TimeSpan.Zero)
-            {
-                var cutoff = timestamp - PlotRetentionWindow;
-                samples.RemoveAll(sample => sample.Time < cutoff);
-            }
-
-            if (samples.Count > MaxPlotPointsPerSeries)
-            {
-                var excess = samples.Count - MaxPlotPointsPerSeries;
-                samples.RemoveRange(0, excess);
-            }
-
-            return true;
+            RequestPlotRender();
         }
+
+        private void AddReadHistoryRecord(TagReadRecord record)
+        {
+            lock (_cacheLock)
+            {
+                var insertIndex = 0;
+
+                while (insertIndex < _renderCache.Count)
+                {
+                    var existing = _renderCache[insertIndex];
+                    var comparison = DateTime.Compare(existing.LastSeen, record.LastSeen);
+
+                    if (_readHistorySortDescending)
+                    {
+                        if (comparison <= 0)
+                        {
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        if (comparison >= 0)
+                        {
+                            break;
+                        }
+                    }
+
+                    insertIndex++;
+                }
+
+                _readHistoryBinding.Insert(insertIndex, record);
+            }
+        }
+
+        private void RequestPlotRender()
+        {
+            var now = DateTime.UtcNow;
+
+            if (now - _lastPlotRenderTime >= PlotRenderThrottleInterval || !_plotStartTime.HasValue)
+            {
+                RenderPlot();
+                return;
+            }
+
+            if (_plotRenderPending)
+            {
+                return;
+            }
+
+            var delay = PlotRenderThrottleInterval - (now - _lastPlotRenderTime);
+            var intervalMs = Math.Max(1, (int)delay.TotalMilliseconds);
+
+            _plotRenderTimer.Stop();
+            _plotRenderTimer.Interval = intervalMs;
+            _plotRenderPending = true;
+            _plotRenderTimer.Start();
+        }
+
+        private List<TagReadRecord> BuildRenderableRecords()
+        {
+            List<TagReadRecord> snapshot;
+            lock (_cacheLock)
+            {
+                if (_renderCache.Count == 0)
+                {
+                    return new List<TagReadRecord>();
+                }
+
+                snapshot = _renderCache.ToList();
+            }
+
+            var selectedEpcs = GetSelectedEpcFilters();
+            var hasFilter = checkPlotSelectionOnly.Checked && selectedEpcs.Count > 0;
+            var hasRetentionLimit = PlotRetentionWindow > TimeSpan.Zero;
+            var cutoff = hasRetentionLimit ? DateTime.Now - PlotRetentionWindow : DateTime.MinValue;
+
+            var filtered = new List<TagReadRecord>(snapshot.Count);
+                foreach (var record in snapshot)
+            {
+                if (hasRetentionLimit && record.LastSeen < cutoff)
+                {
+                    continue;
+                }
+
+                if (hasFilter && !selectedEpcs.Contains(record.Epc))
+                {
+                    continue;
+                }
+
+                filtered.Add(record);
+            }
+
+            filtered.Sort(static (a, b) => DateTime.Compare(a.LastSeen, b.LastSeen));
+            return filtered;
+        }
+
+        private static Dictionary<PlotSeriesKey, List<TagReadRecord>> GroupRecordsBySeries(IEnumerable<TagReadRecord> records)
+        {
+            var grouped = new Dictionary<PlotSeriesKey, List<TagReadRecord>>();
+
+            foreach (var record in records)
+            {
+                if (double.IsNaN(record.Rssi) || double.IsInfinity(record.Rssi))
+                {
+                    continue;
+                }
+
+                var key = new PlotSeriesKey(record.Epc, record.AntennaPort);
+                if (!grouped.TryGetValue(key, out var list))
+                {
+                    list = new List<TagReadRecord>();
+                    grouped[key] = list;
+                }
+
+                list.Add(record);
+                if (list.Count > MaxPlotPointsPerSeries)
+                {
+                    var excess = list.Count - MaxPlotPointsPerSeries;
+                    list.RemoveRange(0, excess);
+                }
+            }
+
+            return grouped;
+        }
+
+        private HashSet<string> GetSelectedEpcFilters()
+        {
+            if (!checkPlotSelectionOnly.Checked || checkedListEpcSelection.CheckedItems.Count == 0)
+            {
+                return new HashSet<string>(StringComparer.Ordinal);
+            }
+
+            var result = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in checkedListEpcSelection.CheckedItems)
+            {
+                if (item is string epc)
+                {
+                    result.Add(epc);
+                }
+            }
+
+            return result;
+        }
+
+        private void RefreshEpcSelectionList()
+        {
+            _isUpdatingEpcSelection = true;
+            var existingSelections = new HashSet<string>(
+                checkedListEpcSelection.CheckedItems.Cast<string>(),
+                StringComparer.Ordinal);
+
+            checkedListEpcSelection.BeginUpdate();
+            checkedListEpcSelection.Items.Clear();
+
+            foreach (var epc in _tagIndex.Keys.OrderBy(k => k, StringComparer.Ordinal))
+            {
+                checkedListEpcSelection.Items.Add(epc, existingSelections.Contains(epc));
+            }
+
+            checkedListEpcSelection.EndUpdate();
+            _isUpdatingEpcSelection = false;
+        }
+
+        private void ClearEpcSelection()
+        {
+            _isUpdatingEpcSelection = true;
+            checkedListEpcSelection.BeginUpdate();
+            for (int i = 0; i < checkedListEpcSelection.Items.Count; i++)
+            {
+                checkedListEpcSelection.SetItemChecked(i, false);
+            }
+            checkedListEpcSelection.EndUpdate();
+            _isUpdatingEpcSelection = false;
+        }
+
+        private void CheckedListEpcSelection_ItemCheck(object? sender, ItemCheckEventArgs e)
+        {
+            if (_isUpdatingEpcSelection)
+            {
+                return;
+            }
+
+            BeginInvoke(new Action(() =>
+            {
+                if (checkPlotSelectionOnly.Checked)
+                {
+                    RequestPlotRender();
+                }
+            }));
+        }
+
 
         private void RenderPlot()
         {
+            _plotRenderTimer.Stop();
+            _plotRenderPending = false;
+            _lastPlotRenderTime = DateTime.UtcNow;
+
             var plot = formsPlotRssi.Plot;
             plot.Clear();
 
-            foreach (var entry in _plotSeriesData)
+            var records = BuildRenderableRecords();
+            if (records.Count == 0)
+            {
+                _plotStartTime = null;
+                formsPlotRssi.Refresh();
+                return;
+            }
+
+            var grouped = GroupRecordsBySeries(records);
+            if (grouped.Count == 0)
+            {
+                _plotStartTime = null;
+                formsPlotRssi.Refresh();
+                return;
+            }
+
+            var baseTime = records[0].LastSeen;
+            _plotStartTime = baseTime;
+
+            foreach (var entry in grouped)
             {
                 var samples = entry.Value;
                 if (samples.Count == 0)
@@ -944,16 +1200,31 @@ namespace ImpinjR700
                     continue;
                 }
 
-                double[] xs = samples.Select(sample => sample.Time.ToOADate()).ToArray();
+                double[] xs = samples.Select(sample => (sample.LastSeen - baseTime).TotalSeconds).ToArray();
                 double[] ys = samples.Select(sample => sample.Rssi).ToArray();
                 var scatter = plot.Add.Scatter(xs, ys);
-                scatter.LegendText = entry.Key;
+                scatter.LegendText = FormatPlotLegend(entry.Key);
                 scatter.MarkerSize = 4;
                 scatter.LineWidth = 2;
             }
 
             plot.Axes.AutoScale();
             formsPlotRssi.Refresh();
+        }
+
+        private void PlotRenderTimer_Tick(object? sender, EventArgs e)
+        {
+            RenderPlot();
+        }
+
+        private static string FormatPlotLegend(PlotSeriesKey seriesKey)
+        {
+            if (seriesKey.AntennaPort == 0)
+            {
+                return seriesKey.Epc;
+            }
+
+            return $"{seriesKey.Epc} - port {seriesKey.AntennaPort}";
         }
 
         private static DateTime SafeToLocal(ImpinjTimestamp timestamp)
@@ -1140,7 +1411,11 @@ namespace ImpinjR700
         private void ClearTagData(string logMessage)
         {
             _tagIndex.Clear();
-            _tagBinding.Clear();
+            lock (_cacheLock)
+            {
+                _readHistoryBinding.Clear();
+            }
+            RefreshEpcSelectionList();
             _totalReadCount = 0;
             ResetPlotData();
             UpdateStatistics();
@@ -1171,7 +1446,7 @@ namespace ImpinjR700
         /// </summary>
         private void UpdateExportButtons()
         {
-            var available = !_isExporting && _tagBinding.Count > 0;
+            var available = !_isExporting && _readHistoryBinding.Count > 0;
             buttonExportCsv.Enabled = available;
             buttonExportExcel.Enabled = available;
         }
@@ -1237,56 +1512,20 @@ namespace ImpinjR700
         /// <summary>
         ///  捕获当前标签数据快照。
         /// </summary>
-        private List<TagSnapshot> CaptureTagSnapshots()
+        private List<TagReadRecord> CaptureReadHistorySnapshot()
         {
-            return _tagBinding
-                .Select(tag => new TagSnapshot
-                {
-                    Epc = tag.Epc,
-                    Antenna = tag.Antenna,
-                    Rssi = tag.Rssi,
-                    Phase = tag.Phase,
-                    ReadCount = tag.ReadCount,
-                    FirstSeen = tag.FirstSeen,
-                    LastSeen = tag.LastSeen
-                })
-                .ToList();
-        }
-
-        private List<PlotDataRow> CapturePlotSamplesSnapshot()
-        {
-            var rows = new List<PlotDataRow>();
-
-            foreach (var entry in _plotSeriesData)
+            lock (_cacheLock)
             {
-                var epc = entry.Key;
-                _tagIndex.TryGetValue(epc, out var viewModel);
-
-                foreach (var sample in entry.Value)
-                {
-                    rows.Add(new PlotDataRow(
-                        epc,
-                        sample.Time,
-                        sample.Rssi,
-                        viewModel?.Antenna ?? string.Empty,
-                        viewModel?.Phase ?? double.NaN,
-                        viewModel?.ReadCount ?? 0));
-                }
+                return _renderCache.ToList();
             }
-
-            return rows
-                .OrderBy(r => r.Timestamp)
-                .ThenBy(r => r.Epc, StringComparer.Ordinal)
-                .ToList();
         }
-
 
         /// <summary>
         ///  执行 CSV 导出。
         /// </summary>
         private async Task ExportCsvAsync()
         {
-            if (_tagBinding.Count == 0)
+            if (_readHistoryBinding.Count == 0)
             {
                 MessageBox.Show(this, "当前没有可导出的标签数据。", "导出提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -1305,12 +1544,11 @@ namespace ImpinjR700
                 return;
             }
 
-            var summary = CaptureTagSnapshots();
-            var samples = CapturePlotSamplesSnapshot();
+            var records = CaptureReadHistorySnapshot();
             SetExportInProgress(true);
             try
             {
-                await Task.Run(() => WriteCsv(dialog.FileName, summary, samples));
+                await Task.Run(() => WriteCsv(dialog.FileName, records));
                 AppendLog($"已导出 CSV：{dialog.FileName}");
                 MessageBox.Show(this, "CSV 导出完成。", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -1330,7 +1568,7 @@ namespace ImpinjR700
         /// </summary>
         private async Task ExportExcelAsync()
         {
-            if (_tagBinding.Count == 0)
+            if (_readHistoryBinding.Count == 0)
             {
                 MessageBox.Show(this, "当前没有可导出的标签数据。", "导出提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -1349,12 +1587,11 @@ namespace ImpinjR700
                 return;
             }
 
-            var summary = CaptureTagSnapshots();
-            var samples = CapturePlotSamplesSnapshot();
+            var records = CaptureReadHistorySnapshot();
             SetExportInProgress(true);
             try
             {
-                await Task.Run(() => WriteExcel(dialog.FileName, summary, samples));
+                await Task.Run(() => WriteExcel(dialog.FileName, records));
                 AppendLog($"已导出 Excel：{dialog.FileName}");
                 MessageBox.Show(this, "Excel 导出完成。", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -1374,8 +1611,7 @@ namespace ImpinjR700
         /// </summary>
         private static void WriteCsv(
             string filePath,
-            IReadOnlyList<TagSnapshot> summary,
-            IReadOnlyList<PlotDataRow> samples)
+            IReadOnlyList<TagReadRecord> records)
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
@@ -1384,35 +1620,16 @@ namespace ImpinjR700
             }
 
             var builder = new StringBuilder();
-            builder.AppendLine("# Tag Summary");
-            builder.AppendLine("EPC,天线,RSSI (dBm),相位 (°),读取次数,首次读取时间,最后读取时间");
+            builder.AppendLine("最后读取时间,EPC,天线,RSSI (dBm),相位 (°),首次读取时间");
 
-            foreach (var item in summary)
+            foreach (var record in records)
             {
-                builder.Append(EscapeCsvValue(item.Epc)).Append(',');
-                builder.Append(EscapeCsvValue(item.Antenna)).Append(',');
-                builder.Append(item.Rssi.ToString("F1")).Append(',');
-                builder.Append(double.IsNaN(item.Phase) ? string.Empty : item.Phase.ToString("F1")).Append(',');
-                builder.Append(item.ReadCount.ToString()).Append(',');
-                builder.Append(EscapeCsvValue(item.FirstSeen == DateTime.MinValue ? string.Empty : item.FirstSeen.ToString("yyyy-MM-dd HH:mm:ss.fff"))).Append(',');
-                builder.AppendLine(EscapeCsvValue(item.LastSeen == DateTime.MinValue ? string.Empty : item.LastSeen.ToString("yyyy-MM-dd HH:mm:ss.fff")));
-            }
-
-            if (samples.Count > 0)
-            {
-                builder.AppendLine();
-                builder.AppendLine("# RSSI Samples");
-                builder.AppendLine("EPC,时间,RSSI (dBm),天线,相位 (°),读取次数");
-
-                foreach (var sample in samples)
-                {
-                    builder.Append(EscapeCsvValue(sample.Epc)).Append(',');
-                    builder.Append(EscapeCsvValue(sample.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff"))).Append(',');
-                    builder.Append(sample.Rssi.ToString("F1")).Append(',');
-                    builder.Append(EscapeCsvValue(sample.Antenna)).Append(',');
-                    builder.Append(double.IsNaN(sample.Phase) ? string.Empty : sample.Phase.ToString("F1")).Append(',');
-                    builder.AppendLine(sample.ReadCount.ToString());
-                }
+                builder.Append(EscapeCsvValue(FormatTimestamp(record.LastSeen))).Append(',');
+                builder.Append(EscapeCsvValue(record.Epc)).Append(',');
+                builder.Append(EscapeCsvValue(record.Antenna)).Append(',');
+                builder.Append(record.Rssi.ToString("F1")).Append(',');
+                builder.Append(double.IsNaN(record.Phase) ? string.Empty : record.Phase.ToString("F1")).Append(',');
+                builder.AppendLine(EscapeCsvValue(FormatTimestamp(record.FirstSeen)));
             }
 
             File.WriteAllText(filePath, builder.ToString(), new UTF8Encoding(true));
@@ -1436,13 +1653,19 @@ namespace ImpinjR700
             return value;
         }
 
+        private static string FormatTimestamp(DateTime value)
+        {
+            return value == DateTime.MinValue
+                ? string.Empty
+                : value.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        }
+
         /// <summary>
         ///  写入 Excel 文件。
         /// </summary>
         private static void WriteExcel(
             string filePath,
-            IReadOnlyList<TagSnapshot> summary,
-            IReadOnlyList<PlotDataRow> samples)
+            IReadOnlyList<TagReadRecord> records)
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
@@ -1451,55 +1674,28 @@ namespace ImpinjR700
             }
 
             using var workbook = new XLWorkbook();
-            var summarySheet = workbook.Worksheets.Add("Tag Summary");
+            var sheet = workbook.Worksheets.Add("Tag History");
 
-            string[] summaryHeaders = { "EPC", "天线", "RSSI (dBm)", "相位 (°)", "读取次数", "首次读取时间", "最后读取时间" };
-            for (var col = 0; col < summaryHeaders.Length; col++)
+            string[] headers = { "最后读取时间", "EPC", "天线", "RSSI (dBm)", "相位 (°)", "首次读取时间" };
+            for (var col = 0; col < headers.Length; col++)
             {
-                summarySheet.Cell(1, col + 1).Value = summaryHeaders[col];
-                summarySheet.Cell(1, col + 1).Style.Font.SetBold();
+                sheet.Cell(1, col + 1).Value = headers[col];
+                sheet.Cell(1, col + 1).Style.Font.SetBold();
             }
 
             var row = 2;
-            foreach (var item in summary)
+            foreach (var record in records)
             {
-                summarySheet.Cell(row, 1).Value = item.Epc;
-                summarySheet.Cell(row, 2).Value = item.Antenna;
-                summarySheet.Cell(row, 3).Value = item.Rssi;
-                summarySheet.Cell(row, 4).Value = double.IsNaN(item.Phase) ? string.Empty : item.Phase;
-                summarySheet.Cell(row, 5).Value = item.ReadCount;
-                summarySheet.Cell(row, 6).Value = item.FirstSeen == DateTime.MinValue ? string.Empty : item.FirstSeen.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                summarySheet.Cell(row, 7).Value = item.LastSeen == DateTime.MinValue ? string.Empty : item.LastSeen.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                sheet.Cell(row, 1).Value = FormatTimestamp(record.LastSeen);
+                sheet.Cell(row, 2).Value = record.Epc;
+                sheet.Cell(row, 3).Value = record.Antenna;
+                sheet.Cell(row, 4).Value = record.Rssi;
+                sheet.Cell(row, 5).Value = double.IsNaN(record.Phase) ? string.Empty : record.Phase;
+                sheet.Cell(row, 6).Value = FormatTimestamp(record.FirstSeen);
                 row++;
             }
 
-            summarySheet.Columns().AdjustToContents();
-
-            if (samples.Count > 0)
-            {
-                var sampleSheet = workbook.Worksheets.Add("RSSI Samples");
-                string[] sampleHeaders = { "EPC", "时间", "RSSI (dBm)", "天线", "相位 (°)", "读取次数" };
-                for (var col = 0; col < sampleHeaders.Length; col++)
-                {
-                    sampleSheet.Cell(1, col + 1).Value = sampleHeaders[col];
-                    sampleSheet.Cell(1, col + 1).Style.Font.SetBold();
-                }
-
-                row = 2;
-                foreach (var sample in samples)
-                {
-                    sampleSheet.Cell(row, 1).Value = sample.Epc;
-                    sampleSheet.Cell(row, 2).Value = sample.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                    sampleSheet.Cell(row, 3).Value = sample.Rssi;
-                    sampleSheet.Cell(row, 4).Value = sample.Antenna;
-                    sampleSheet.Cell(row, 5).Value = double.IsNaN(sample.Phase) ? string.Empty : sample.Phase;
-                    sampleSheet.Cell(row, 6).Value = sample.ReadCount;
-                    row++;
-                }
-
-                sampleSheet.Columns().AdjustToContents();
-            }
-
+            sheet.Columns().AdjustToContents();
             workbook.SaveAs(filePath);
         }
 
@@ -1533,26 +1729,6 @@ namespace ImpinjR700
         /// </summary>
 
 
-        private sealed class PlotDataRow
-        {
-            public PlotDataRow(string epc, DateTime timestamp, double rssi, string antenna, double phase, ushort readCount)
-            {
-                Epc = epc;
-                Timestamp = timestamp;
-                Rssi = rssi;
-                Antenna = antenna;
-                Phase = phase;
-                ReadCount = readCount;
-            }
-
-            public string Epc { get; }
-            public DateTime Timestamp { get; }
-            public double Rssi { get; }
-            public string Antenna { get; }
-            public double Phase { get; }
-            public ushort ReadCount { get; }
-        }
-
         private readonly struct PlotSample
         {
             public PlotSample(DateTime time, double rssi)
@@ -1565,15 +1741,66 @@ namespace ImpinjR700
             public double Rssi { get; }
         }
 
-        private sealed class TagSnapshot
+        private readonly struct PlotSeriesKey : IEquatable<PlotSeriesKey>
         {
-            public string Epc { get; init; } = string.Empty;
-            public string Antenna { get; init; } = string.Empty;
-            public double Rssi { get; init; }
-            public double Phase { get; init; }
-            public ushort ReadCount { get; init; }
-            public DateTime FirstSeen { get; init; }
-            public DateTime LastSeen { get; init; }
+            public PlotSeriesKey(string epc, ushort antennaPort)
+            {
+                Epc = epc ?? string.Empty;
+                AntennaPort = antennaPort;
+            }
+
+            public string Epc { get; }
+            public ushort AntennaPort { get; }
+
+            public bool Equals(PlotSeriesKey other)
+            {
+                return string.Equals(Epc, other.Epc, StringComparison.Ordinal) &&
+                       AntennaPort == other.AntennaPort;
+            }
+
+            public override bool Equals(object? obj)
+            {
+                return obj is PlotSeriesKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    var hash = StringComparer.Ordinal.GetHashCode(Epc);
+                    hash = (hash * 397) ^ AntennaPort.GetHashCode();
+                    return hash;
+                }
+            }
+        }
+
+        private sealed class TagReadRecord
+        {
+            public TagReadRecord(string epc, ushort antennaPort, string antenna, double rssi, double phase, ushort readCount, DateTime firstSeen, DateTime lastSeen)
+            {
+                Epc = epc;
+                AntennaPort = antennaPort;
+                Antenna = antenna;
+                Rssi = rssi;
+                Phase = phase;
+                ReadCount = readCount;
+                FirstSeen = firstSeen;
+                LastSeen = lastSeen;
+            }
+
+            public string Epc { get; }
+            public ushort AntennaPort { get; }
+            public string Antenna { get; }
+            public double Rssi { get; }
+            public double Phase { get; }
+            public ushort ReadCount { get; }
+            public DateTime FirstSeen { get; }
+            public DateTime LastSeen { get; }
+            public string RssiDisplay => $"{Rssi:F1}";
+            public string PhaseDisplay => double.IsNaN(Phase) ? string.Empty : Phase.ToString("F1");
+            public string ReadCountDisplay => ReadCount.ToString();
+            public string FirstSeenDisplay => FormatTimestamp(FirstSeen);
+            public string LastSeenDisplay => FormatTimestamp(LastSeen);
         }
 
         /// <summary>
