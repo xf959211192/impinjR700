@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Reflection;
 using ClosedXML.Excel;
 using Impinj.OctaneSdk;
 
@@ -29,19 +30,35 @@ namespace ImpinjR700
         private CancellationTokenSource? _reconnectCts;
         private bool _isExporting;
         private bool _suppressAntennaAutoSave;
-        private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromMinutes(5);
-        private const int MaxPlotPointsPerSeries = 500;
-        private static readonly TimeSpan PlotRenderThrottleInterval = TimeSpan.FromMilliseconds(150);
+        private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromSeconds(60);
+        private const double PlotDisplayWindowSeconds = 60;
+        private const double PlotGapThresholdSeconds = 3;
+        private const int MaxPlotPointsPerSeries = 0;
+        private static readonly TimeSpan PlotRenderThrottleInterval = TimeSpan.FromMilliseconds(50);
         private const string PlotFontName = "Microsoft YaHei";
         private static readonly string AntennaSelectionFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ImpinjR700",
             "antenna-selection.txt");
         private readonly System.Windows.Forms.Timer _plotRenderTimer;
+        private readonly System.Windows.Forms.Timer _signalTestTimer;
+        private readonly Random _signalNoiseRandom = new();
         private bool _plotRenderPending;
         private DateTime _lastPlotRenderTime = DateTime.MinValue;
         private bool _readHistorySortDescending = true;
         private bool _isUpdatingEpcSelection;
+        private bool _isSignalTestRunning;
+        private DateTime _signalTestStartTime = DateTime.MinValue;
+        private readonly Dictionary<string, ushort> _signalReadCountByEpc = new();
+        private readonly CheckBox _checkShowLegend = new();
+        private readonly SimulatedEpcProfile[] _simulatedEpcProfiles =
+        {
+            new("E2000017221101441890ABCD", -57.5, 0.0, 0.0),
+            new("E2000017221101441890ABCE", -59.0, Math.PI / 9, Math.PI / 11),
+            new("E2000017221101441890ABCF", -61.0, Math.PI / 3, Math.PI / 5),
+            new("E2000017221101441890ABD0", -62.2, Math.PI / 2, Math.PI / 7)
+        };
+        private static readonly ushort[] SimulatedAntennaPorts = { 1, 2 };
 
         public Form1()
         {
@@ -52,36 +69,43 @@ namespace ImpinjR700
                 Interval = (int)PlotRenderThrottleInterval.TotalMilliseconds
             };
             _plotRenderTimer.Tick += PlotRenderTimer_Tick;
+            _signalTestTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 60
+            };
+            _signalTestTimer.Tick += SignalTestTimer_Tick;
             InitializeUiState();
         }
 
         /// <summary>
-        ///  初始化 RSSI 曲线基础样式。
+        ///  初始化 RSSI 曲线图样式。
         /// </summary>
         private void ConfigurePlot()
         {
-            var plot = formsPlotRssi.Plot;
+            ConfigureSinglePlot(formsPlotRssi.Plot, "RSSI (dBm)");
+            ConfigureSinglePlot(formsPlotPhase.Plot, "Phase (rad)");
+            formsPlotRssi.Refresh();
+            formsPlotPhase.Refresh();
+        }
+
+        private static void ConfigureSinglePlot(ScottPlot.Plot plot, string yAxisLabel)
+        {
             plot.Clear();
 
             plot.Axes.Bottom.Label.Text = "TIME  (s)";
             plot.Axes.Bottom.Label.FontName = PlotFontName;
             plot.Axes.Bottom.TickLabelStyle.FontName = PlotFontName;
 
-            plot.Axes.Left.Label.Text = "RSSI (dBm)";
+            plot.Axes.Left.Label.Text = yAxisLabel;
             plot.Axes.Left.Label.FontName = PlotFontName;
             plot.Axes.Left.TickLabelStyle.FontName = PlotFontName;
 
-            var legend = plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
-            if (legend is not null)
-            {
-                legend.FontName = PlotFontName;
-            }
-
-            formsPlotRssi.Refresh();
+            plot.Axes.SetLimitsX(0, PlotDisplayWindowSeconds);
+            ClampXAxisToZero(plot);
         }
 
         /// <summary>
-        ///  清空曲线缓存并刷新画布。
+        ///  调整主分割区域高度比例。
         /// </summary>
         private void SplitMain_SizeChanged(object? sender, EventArgs e)
         {
@@ -124,6 +148,7 @@ namespace ImpinjR700
             columnFirstSeen.DisplayIndex = 5;
             columnReadCount.Visible = false;
             gridTags.ClearSelection();
+            EnableGridDoubleBuffer(gridTags);
 
             _readHistoryBinding.ListChanged += (_, _) => UpdateExportButtons();
             checkedListEpcSelection.ItemCheck += CheckedListEpcSelection_ItemCheck;
@@ -141,6 +166,7 @@ namespace ImpinjR700
             buttonReaderInfo.Click += (_, _) => ShowReaderInfo();
             buttonStart.Click += (_, _) => StartReading();
             buttonStop.Click += (_, _) => StopReading();
+            buttonTestSignal.Click += (_, _) => ToggleSignalTest();
             buttonAntennaConfig.Click += (_, _) => ShowAntennaConfigurationDialog();
             buttonClear.Click += (_, _) => ClearTagData("已清空标签记录。");
             buttonExportCsv.Click += async (_, _) => await ExportCsvAsync();
@@ -153,9 +179,24 @@ namespace ImpinjR700
                 }
             };
             checkPlotSelectionOnly.CheckedChanged += (_, _) => OnPlotSelectionFilterChanged();
+            if (_checkShowLegend.Parent == null)
+            {
+                _checkShowLegend.AutoSize = true;
+                _checkShowLegend.Name = "checkShowLegend";
+                _checkShowLegend.Text = "显示图例";
+                _checkShowLegend.Checked = true;
+                _checkShowLegend.UseVisualStyleBackColor = true;
+                _checkShowLegend.CheckedChanged += (_, _) => RequestPlotRender();
+                groupExport.Controls.Add(_checkShowLegend);
+                groupExport.SizeChanged += (_, _) => UpdateLegendToggleLayout();
+                checkPlotSelectionOnly.SizeChanged += (_, _) => UpdateLegendToggleLayout();
+                checkPlotSelectionOnly.LocationChanged += (_, _) => UpdateLegendToggleLayout();
+                UpdateLegendToggleLayout();
+            }
             RefreshEpcSelectionList();
             FormClosing += (_, _) =>
             {
+                StopSignalTest(logStop: false);
                 CancelReconnect();
                 Disconnect();
                 _plotRenderTimer.Stop();
@@ -172,7 +213,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  初始化统计面板。
+        ///  初始化统计信息面板。
         /// </summary>
         private void ConfigureStatisticsView()
         {
@@ -247,6 +288,7 @@ namespace ImpinjR700
         /// </summary>
         private void Disconnect()
         {
+            StopSignalTest(logStop: false);
             CancelReconnect();
 
             if (_reader != null)
@@ -299,6 +341,11 @@ namespace ImpinjR700
                 MessageBox.Show(this, "请先成功连接读写器后再开始读取。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 buttonConnect.Enabled = true;
                 return;
+            }
+
+            if (_isSignalTestRunning)
+            {
+                StopSignalTest(logStop: true);
             }
 
             try
@@ -499,12 +546,12 @@ namespace ImpinjR700
             }
             catch
             {
-                // 忽略持久化失败，避免影响主流程
+                // 蹇界暐鎸佷箙鍖栧け璐ワ紝閬垮厤褰卞搷涓绘祦绋?
             }
         }
 
         /// <summary>
-        ///  恢复天线端口为全启用状态，用于读取结束后保持默认配置。
+        ///  恢复天线端口为全启用状态。
         /// </summary>
         private void EnableAllAntennaPorts()
         {
@@ -561,7 +608,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  确保设置对象中的所有天线端口均被启用。
+        ///  处理天线勾选变化并自动保存配置。
         /// </summary>
         private void checkedListAntennas_ItemCheck(object? sender, ItemCheckEventArgs e)
         {
@@ -573,7 +620,7 @@ namespace ImpinjR700
             if (_isReading)
             {
                 e.NewValue = e.CurrentValue;
-                MessageBox.Show(this, "读取进行中，无法修改天线启用状态，请先停止读取。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "读取进行中，无法修改天线启用状态，请先停止读取中", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -678,7 +725,7 @@ namespace ImpinjR700
 
 
         /// <summary>
-        ///  将读写器当前天线配置同步到目标设置，避免启用无效端口导致异常。
+        ///  将当前天线配置同步到目标设置。
         /// </summary>
         private static void CopyAntennaConfiguration(ImpinjReader reader, Settings source, Settings target)
         {
@@ -925,7 +972,7 @@ namespace ImpinjR700
                 viewModel.LastSeen = lastSeen;
                 viewModel.Antenna = FormatAntenna(tag.AntennaPortNumber);
                 viewModel.Rssi = tag.PeakRssiInDbm;
-                viewModel.Phase = ExtractPhaseDegrees(tag);
+                viewModel.Phase = ExtractPhaseRadians(tag);
 
                 var reportedCount = tag.TagSeenCount;
                 if (reportedCount <= 0 || reportedCount < viewModel.ReadCount)
@@ -967,7 +1014,6 @@ namespace ImpinjR700
             if (!checkPlotSelectionOnly.Checked)
             {
                 gridTags.ClearSelection();
-                ClearEpcSelection();
             }
 
             RequestPlotRender();
@@ -975,6 +1021,15 @@ namespace ImpinjR700
 
         private void AddReadHistoryRecord(TagReadRecord record)
         {
+            var preserveSelection = gridTags.Focused && gridTags.SelectedRows.Count > 0;
+            TagReadRecord? selectedRecord = null;
+            var firstDisplayedRowIndex = -1;
+            if (preserveSelection)
+            {
+                selectedRecord = gridTags.SelectedRows[0].DataBoundItem as TagReadRecord;
+                firstDisplayedRowIndex = gridTags.FirstDisplayedScrollingRowIndex;
+            }
+
             lock (_cacheLock)
             {
                 var insertIndex = 0;
@@ -1004,7 +1059,191 @@ namespace ImpinjR700
 
                 _readHistoryBinding.Insert(insertIndex, record);
             }
+
+            if (preserveSelection && selectedRecord != null)
+            {
+                RestoreGridSelection(selectedRecord, firstDisplayedRowIndex);
+            }
         }
+
+        private void RestoreGridSelection(TagReadRecord selectedRecord, int firstDisplayedRowIndex)
+        {
+            if (gridTags.Rows.Count == 0)
+            {
+                return;
+            }
+
+            DataGridViewRow? targetRow = null;
+            foreach (DataGridViewRow row in gridTags.Rows)
+            {
+                if (ReferenceEquals(row.DataBoundItem, selectedRecord))
+                {
+                    targetRow = row;
+                    break;
+                }
+            }
+
+            if (targetRow == null)
+            {
+                return;
+            }
+
+            gridTags.ClearSelection();
+            targetRow.Selected = true;
+            gridTags.CurrentCell = null;
+
+            if (firstDisplayedRowIndex >= 0 && firstDisplayedRowIndex < gridTags.RowCount)
+            {
+                gridTags.FirstDisplayedScrollingRowIndex = firstDisplayedRowIndex;
+            }
+        }
+
+        private static void EnableGridDoubleBuffer(DataGridView grid)
+        {
+            var property = typeof(DataGridView).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+            property?.SetValue(grid, true);
+        }
+
+        private void ToggleSignalTest()
+        {
+            if (_isSignalTestRunning)
+            {
+                StopSignalTest(logStop: true);
+                return;
+            }
+
+            if (_isReading)
+            {
+                MessageBox.Show(this, "当前正在真实读取，请先停止读取后再启动测试信号。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            StartSignalTest();
+        }
+
+        private void StartSignalTest()
+        {
+            _signalTestStartTime = DateTime.Now;
+            _signalReadCountByEpc.Clear();
+            _isSignalTestRunning = true;
+            buttonTestSignal.Text = "停止测试";
+            AppendLog("测试信号已启动。");
+            _signalTestTimer.Start();
+        }
+
+        private void StopSignalTest(bool logStop)
+        {
+            if (!_isSignalTestRunning)
+            {
+                return;
+            }
+
+            _signalTestTimer.Stop();
+            _isSignalTestRunning = false;
+            buttonTestSignal.Text = "测试信号";
+            if (logStop)
+            {
+                AppendLog("测试信号已停止。");
+            }
+        }
+
+        private void SignalTestTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!_isSignalTestRunning)
+            {
+                return;
+            }
+
+            EmitSimulatedRssiSample();
+        }
+
+        private void EmitSimulatedRssiSample()
+        {
+            var now = DateTime.Now;
+            var elapsedSeconds = (now - _signalTestStartTime).TotalSeconds;
+            var epcListChanged = false;
+
+            foreach (var profile in _simulatedEpcProfiles)
+            {
+                foreach (var antennaPort in SimulatedAntennaPorts)
+                {
+                    var antennaBias = antennaPort == 1 ? 0.0 : -2.5;
+                    var antennaPhaseOffset = antennaPort == 1 ? 0.0 : Math.PI / 6;
+                    epcListChanged |= EmitSimulatedSample(
+                        now,
+                        elapsedSeconds,
+                        profile.Epc,
+                        antennaPort,
+                        baseRssi: profile.BaseRssi + antennaBias,
+                        rssiPhaseShift: profile.RssiPhaseShift + antennaPhaseOffset,
+                        phaseShift: profile.PhaseShift + antennaPhaseOffset);
+                }
+            }
+
+            if (epcListChanged)
+            {
+                RefreshEpcSelectionList();
+            }
+
+            RequestPlotRender();
+            UpdateStatistics();
+            UpdateExportButtons();
+        }
+
+        private bool EmitSimulatedSample(
+            DateTime now,
+            double elapsedSeconds,
+            string epc,
+            ushort antennaPort,
+            double baseRssi,
+            double rssiPhaseShift,
+            double phaseShift)
+        {
+            var periodic = 6.5 * Math.Sin((elapsedSeconds * 2 * Math.PI / 3.5) + rssiPhaseShift);
+            var fastRipple = 1.8 * Math.Sin((elapsedSeconds * 2 * Math.PI / 0.7) + (rssiPhaseShift * 0.5));
+            var noise = (_signalNoiseRandom.NextDouble() - 0.5) * 1.2;
+            var rssi = Math.Clamp(baseRssi + periodic + fastRipple + noise, -82, -30);
+            var phase = (elapsedSeconds * 1.8 + phaseShift) % (2 * Math.PI);
+
+            var isNewTag = !_tagIndex.TryGetValue(epc, out var viewModel);
+            if (isNewTag)
+            {
+                viewModel = new TagViewModel(epc)
+                {
+                    FirstSeen = now
+                };
+                _tagIndex[epc] = viewModel;
+            }
+
+            _signalReadCountByEpc.TryGetValue(epc, out var currentCount);
+            var nextCount = (ushort)Math.Min(ushort.MaxValue, currentCount + 1);
+            _signalReadCountByEpc[epc] = nextCount;
+
+            viewModel!.LastSeen = now;
+            viewModel.Antenna = FormatAntenna(antennaPort);
+            viewModel.Rssi = rssi;
+            viewModel.Phase = phase;
+            viewModel.ReadCount = nextCount;
+            _totalReadCount++;
+
+            AddReadHistoryRecord(new TagReadRecord(
+                epc,
+                antennaPort,
+                FormatAntenna(antennaPort),
+                rssi,
+                phase,
+                nextCount,
+                viewModel.FirstSeen,
+                now));
+
+            return isNewTag;
+        }
+
+        private readonly record struct SimulatedEpcProfile(
+            string Epc,
+            double BaseRssi,
+            double RssiPhaseShift,
+            double PhaseShift);
 
         private void RequestPlotRender()
         {
@@ -1087,7 +1326,7 @@ namespace ImpinjR700
                 }
 
                 list.Add(record);
-                if (list.Count > MaxPlotPointsPerSeries)
+                if (MaxPlotPointsPerSeries > 0 && list.Count > MaxPlotPointsPerSeries)
                 {
                     var excess = list.Count - MaxPlotPointsPerSeries;
                     list.RemoveRange(0, excess);
@@ -1170,14 +1409,19 @@ namespace ImpinjR700
             _plotRenderPending = false;
             _lastPlotRenderTime = DateTime.UtcNow;
 
-            var plot = formsPlotRssi.Plot;
-            plot.Clear();
+            var rssiPlot = formsPlotRssi.Plot;
+            var phasePlot = formsPlotPhase.Plot;
+            rssiPlot.Clear();
+            phasePlot.Clear();
 
             var records = BuildRenderableRecords();
             if (records.Count == 0)
             {
                 _plotStartTime = null;
+                ClampXAxisToZero(rssiPlot);
+                ClampXAxisToZero(phasePlot);
                 formsPlotRssi.Refresh();
+                formsPlotPhase.Refresh();
                 return;
             }
 
@@ -1185,11 +1429,17 @@ namespace ImpinjR700
             if (grouped.Count == 0)
             {
                 _plotStartTime = null;
+                ClampXAxisToZero(rssiPlot);
+                ClampXAxisToZero(phasePlot);
                 formsPlotRssi.Refresh();
+                formsPlotPhase.Refresh();
                 return;
             }
 
-            var baseTime = records[0].LastSeen;
+            var windowStart = DateTime.Now - PlotRetentionWindow;
+            var baseTime = records[0].LastSeen > windowStart
+                ? records[0].LastSeen
+                : windowStart;
             _plotStartTime = baseTime;
 
             foreach (var entry in grouped)
@@ -1200,16 +1450,125 @@ namespace ImpinjR700
                     continue;
                 }
 
-                double[] xs = samples.Select(sample => (sample.LastSeen - baseTime).TotalSeconds).ToArray();
-                double[] ys = samples.Select(sample => sample.Rssi).ToArray();
-                var scatter = plot.Add.Scatter(xs, ys);
-                scatter.LegendText = FormatPlotLegend(entry.Key);
-                scatter.MarkerSize = 4;
-                scatter.LineWidth = 2;
+                var legendText = FormatPlotLegend(entry.Key);
+
+                var rssiSegments = SplitSamplesByGap(
+                    samples,
+                    PlotGapThresholdSeconds,
+                    static sample => !double.IsNaN(sample.Rssi) && !double.IsInfinity(sample.Rssi));
+                ScottPlot.Color? rssiSeriesColor = null;
+                for (var i = 0; i < rssiSegments.Count; i++)
+                {
+                    var segment = rssiSegments[i];
+                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - baseTime).TotalSeconds)).ToArray();
+                    var ys = segment.Select(sample => sample.Rssi).ToArray();
+                    var rssiScatter = rssiPlot.Add.Scatter(xs, ys);
+                    if (i == 0)
+                    {
+                        rssiScatter.LegendText = legendText;
+                        rssiSeriesColor = rssiScatter.Color;
+                    }
+                    else if (rssiSeriesColor.HasValue)
+                    {
+                        rssiScatter.Color = rssiSeriesColor.Value;
+                    }
+                    rssiScatter.MarkerSize = 3;
+                    rssiScatter.LineWidth = 2;
+                }
+
+                var phaseSegments = SplitSamplesByGap(
+                    samples,
+                    PlotGapThresholdSeconds,
+                    static sample => !double.IsNaN(sample.Phase) && !double.IsInfinity(sample.Phase));
+                ScottPlot.Color? phaseSeriesColor = null;
+                for (var i = 0; i < phaseSegments.Count; i++)
+                {
+                    var segment = phaseSegments[i];
+                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - baseTime).TotalSeconds)).ToArray();
+                    var ys = segment.Select(sample => sample.Phase).ToArray();
+                    var phaseScatter = phasePlot.Add.Scatter(xs, ys);
+                    if (i == 0)
+                    {
+                        phaseScatter.LegendText = legendText;
+                        phaseSeriesColor = phaseScatter.Color;
+                    }
+                    else if (phaseSeriesColor.HasValue)
+                    {
+                        phaseScatter.Color = phaseSeriesColor.Value;
+                    }
+                    phaseScatter.MarkerSize = 2;
+                    phaseScatter.LineWidth = 1.5f;
+                    phaseScatter.LinePattern = ScottPlot.LinePattern.Dashed;
+                }
             }
 
-            plot.Axes.AutoScale();
+            rssiPlot.Axes.AutoScale();
+            phasePlot.Axes.AutoScale();
+            rssiPlot.Axes.SetLimitsX(0, PlotDisplayWindowSeconds);
+            phasePlot.Axes.SetLimitsX(0, PlotDisplayWindowSeconds);
+            ApplyLegendVisibility(rssiPlot);
+            ApplyLegendVisibility(phasePlot);
+            ClampXAxisToZero(rssiPlot);
+            ClampXAxisToZero(phasePlot);
             formsPlotRssi.Refresh();
+            formsPlotPhase.Refresh();
+        }
+
+        private void ApplyLegendVisibility(ScottPlot.Plot plot)
+        {
+            var legend = plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
+            if (legend is not null)
+            {
+                legend.FontName = PlotFontName;
+                legend.IsVisible = _checkShowLegend.Checked;
+            }
+        }
+
+        private static List<List<TagReadRecord>> SplitSamplesByGap(
+            IReadOnlyList<TagReadRecord> samples,
+            double gapThresholdSeconds,
+            Func<TagReadRecord, bool> includePredicate)
+        {
+            var segments = new List<List<TagReadRecord>>();
+            List<TagReadRecord>? current = null;
+            DateTime? previousTime = null;
+
+            foreach (var sample in samples)
+            {
+                if (!includePredicate(sample))
+                {
+                    continue;
+                }
+
+                var needNewSegment = current == null ||
+                                     (previousTime.HasValue &&
+                                      (sample.LastSeen - previousTime.Value).TotalSeconds > gapThresholdSeconds);
+                if (needNewSegment)
+                {
+                    current = new List<TagReadRecord>();
+                    segments.Add(current);
+                }
+
+                current!.Add(sample);
+                previousTime = sample.LastSeen;
+            }
+
+            return segments;
+        }
+
+        private static void ClampXAxisToZero(ScottPlot.Plot plot)
+        {
+            var limits = plot.Axes.GetLimits();
+            var right = limits.Right;
+            if (double.IsNaN(right) || double.IsInfinity(right) || right <= 0)
+            {
+                right = PlotDisplayWindowSeconds;
+            }
+
+            if (limits.Left < 0 || limits.Right <= 0 || double.IsNaN(limits.Left) || double.IsInfinity(limits.Left))
+            {
+                plot.Axes.SetLimits(0, right, limits.Bottom, limits.Top);
+            }
         }
 
         private void PlotRenderTimer_Tick(object? sender, EventArgs e)
@@ -1233,16 +1592,15 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  从标签对象中解析相位角度（单位：度）。
-        /// </summary>
-        private static double ExtractPhaseDegrees(Tag tag)
+        ///  从标签对象中解析相位（单位：弧度）。`r`n        /// </summary>
+        private static double ExtractPhaseRadians(Tag tag)
         {
             if (tag == null || !tag.IsRfPhaseAnglePresent)
             {
                 return double.NaN;
             }
 
-            return tag.PhaseAngleInRadians * (180.0 / Math.PI);
+            return tag.PhaseAngleInRadians;
         }
 
         /// <summary>
@@ -1254,7 +1612,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  连接丢失事件处理。
+        ///  处理读写器连接丢失事件。
         /// </summary>
         private void Reader_ConnectionLost(ImpinjReader reader)
         {
@@ -1401,7 +1759,7 @@ namespace ImpinjR700
             catch (OctaneSdkException ex)
             {
                 AppendLog($"获取读写器信息失败：{ex.Message}");
-                MessageBox.Show(this, $"获取读写器信息失败：{ex.Message}", "信息提示", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(this, $"获取读写器信息失败：{ex.Message}", "淇℃伅鎻愮ず", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -1411,6 +1769,7 @@ namespace ImpinjR700
         private void ClearTagData(string logMessage)
         {
             _tagIndex.Clear();
+            _signalReadCountByEpc.Clear();
             lock (_cacheLock)
             {
                 _readHistoryBinding.Clear();
@@ -1439,6 +1798,57 @@ namespace ImpinjR700
             {
                 _statTotalReadsItem.SubItems[1].Text = _totalReadCount.ToString();
             }
+
+            var records = BuildRenderableRecords();
+            UpdatePerSeriesRssiStatistics(records);
+        }
+
+        private void UpdatePerSeriesRssiStatistics(IReadOnlyList<TagReadRecord> records)
+        {
+            listStatistics.BeginUpdate();
+            try
+            {
+                while (listStatistics.Items.Count > 2)
+                {
+                    listStatistics.Items.RemoveAt(listStatistics.Items.Count - 1);
+                }
+
+                var grouped = GroupRecordsBySeries(records);
+                if (grouped.Count == 0)
+                {
+                    return;
+                }
+
+                var sortedEntries = grouped
+                    .OrderBy(entry => FormatPlotLegend(entry.Key), StringComparer.Ordinal)
+                    .ToList();
+
+                foreach (var entry in sortedEntries)
+                {
+                    var seriesName = FormatPlotLegend(entry.Key);
+                    var rssiValues = entry.Value
+                        .Select(record => record.Rssi)
+                        .Where(value => !double.IsNaN(value) && !double.IsInfinity(value))
+                        .ToList();
+
+                    if (rssiValues.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var peak = rssiValues.Max();
+                    var mean = rssiValues.Average();
+                    var variance = rssiValues.Select(value => (value - mean) * (value - mean)).Average();
+
+                    listStatistics.Items.Add(new ListViewItem(new[] { $"{seriesName} RSSI 峰值 (dBm)", peak.ToString("F2") }));
+                    listStatistics.Items.Add(new ListViewItem(new[] { $"{seriesName} RSSI 均值 (dBm)", mean.ToString("F2") }));
+                    listStatistics.Items.Add(new ListViewItem(new[] { $"{seriesName} RSSI 方差", variance.ToString("F2") }));
+                }
+            }
+            finally
+            {
+                listStatistics.EndUpdate();
+            }
         }
 
         /// <summary>
@@ -1452,7 +1862,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  根据当前读写器状态更新“详细配置”按钮。
+        ///  根据连接状态更新“详细配置”按钮。
         /// </summary>
         private void UpdateAntennaConfigurationButtonState()
         {
@@ -1460,8 +1870,21 @@ namespace ImpinjR700
             buttonAntennaConfig.Enabled = canConfigure;
         }
 
+        private void UpdateLegendToggleLayout()
+        {
+            if (_checkShowLegend.Parent == null)
+            {
+                return;
+            }
+
+            var x = checkPlotSelectionOnly.Right + 12;
+            var y = checkPlotSelectionOnly.Top;
+            var maxX = Math.Max(6, groupExport.ClientSize.Width - _checkShowLegend.Width - 6);
+            _checkShowLegend.Location = new Point(Math.Min(x, maxX), y);
+        }
+
         /// <summary>
-        ///  打开详细天线配置窗口并应用用户调整。
+        ///  打开详细天线配置窗口并应用设置。
         /// </summary>
         private void ShowAntennaConfigurationDialog()
         {
@@ -1474,7 +1897,7 @@ namespace ImpinjR700
 
             if (_isReading)
             {
-                MessageBox.Show(this, "读取进行中，无法调整天线配置，请先停止读取。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "读取进行中，无法调整天线配置，请先停止读取中", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -1531,11 +1954,12 @@ namespace ImpinjR700
                 return;
             }
 
+            var records = CaptureReadHistorySnapshot();
             using var dialog = new SaveFileDialog
             {
                 Title = "导出 CSV",
-                Filter = "CSV 文件 (*.csv)|*.csv",
-                FileName = $"TagReport_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                Filter = "CSV 鏂囦欢 (*.csv)|*.csv",
+                FileName = BuildExportFileName(records, "csv"),
                 OverwritePrompt = true
             };
 
@@ -1544,7 +1968,6 @@ namespace ImpinjR700
                 return;
             }
 
-            var records = CaptureReadHistorySnapshot();
             SetExportInProgress(true);
             try
             {
@@ -1574,11 +1997,12 @@ namespace ImpinjR700
                 return;
             }
 
+            var records = CaptureReadHistorySnapshot();
             using var dialog = new SaveFileDialog
             {
                 Title = "导出 Excel",
                 Filter = "Excel 工作簿 (*.xlsx)|*.xlsx",
-                FileName = $"TagReport_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
+                FileName = BuildExportFileName(records, "xlsx"),
                 OverwritePrompt = true
             };
 
@@ -1587,7 +2011,6 @@ namespace ImpinjR700
                 return;
             }
 
-            var records = CaptureReadHistorySnapshot();
             SetExportInProgress(true);
             try
             {
@@ -1620,7 +2043,7 @@ namespace ImpinjR700
             }
 
             var builder = new StringBuilder();
-            builder.AppendLine("最后读取时间,EPC,天线,RSSI (dBm),相位 (°),首次读取时间");
+            builder.AppendLine("最后读取时间,EPC,天线,RSSI (dBm),相位 (rad),首次读取时间");
 
             foreach (var record in records)
             {
@@ -1633,6 +2056,24 @@ namespace ImpinjR700
             }
 
             File.WriteAllText(filePath, builder.ToString(), new UTF8Encoding(true));
+        }
+
+        private static string BuildExportFileName(IReadOnlyList<TagReadRecord> records, string extension)
+        {
+            var datePart = DateTime.Now.ToString("yyyyMMdd");
+            var distinctEpcs = records
+                .Select(record => record.Epc)
+                .Where(epc => !string.IsNullOrWhiteSpace(epc))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            var epcPart = distinctEpcs.Count == 1 ? distinctEpcs[0] : "MULTI";
+            var invalidChars = Path.GetInvalidFileNameChars();
+            var sanitizedEpc = new string(epcPart
+                .Select(ch => invalidChars.Contains(ch) ? '_' : ch)
+                .ToArray());
+
+            return $"RFID_{datePart}_{sanitizedEpc}.{extension}";
         }
 
         /// <summary>
@@ -1661,8 +2102,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  写入 Excel 文件。
-        /// </summary>
+        ///  写入 Excel 文件。`r`n        /// </summary>
         private static void WriteExcel(
             string filePath,
             IReadOnlyList<TagReadRecord> records)
@@ -1676,7 +2116,7 @@ namespace ImpinjR700
             using var workbook = new XLWorkbook();
             var sheet = workbook.Worksheets.Add("Tag History");
 
-            string[] headers = { "最后读取时间", "EPC", "天线", "RSSI (dBm)", "相位 (°)", "首次读取时间" };
+            string[] headers = { "最后读取时间", "EPC", "天线", "RSSI (dBm)", "相位 (rad)", "首次读取时间" };
             for (var col = 0; col < headers.Length; col++)
             {
                 sheet.Cell(1, col + 1).Value = headers[col];
@@ -1725,7 +2165,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  导出使用的标签快照模型。
+        ///  绘图使用的标签快照模型。
         /// </summary>
 
 
@@ -1923,3 +2363,13 @@ namespace ImpinjR700
 
     }
 }
+
+
+
+
+
+
+
+
+
+

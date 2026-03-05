@@ -42,6 +42,7 @@ namespace ImpinjR700
             this.textReaderIp = new System.Windows.Forms.TextBox();
             this.labelReaderIp = new System.Windows.Forms.Label();
             this.groupControl = new System.Windows.Forms.GroupBox();
+            this.buttonTestSignal = new System.Windows.Forms.Button();
             this.checkPlotSelectionOnly = new System.Windows.Forms.CheckBox();
             this.buttonAntennaConfig = new System.Windows.Forms.Button();
             this.checkedListAntennas = new System.Windows.Forms.CheckedListBox();
@@ -75,6 +76,8 @@ namespace ImpinjR700
             this.checkedListEpcSelection = new System.Windows.Forms.CheckedListBox();
             this.tabChart = new System.Windows.Forms.TabPage();
             this.formsPlotRssi = new ScottPlot.WinForms.FormsPlot();
+            this.tabPhase = new System.Windows.Forms.TabPage();
+            this.formsPlotPhase = new ScottPlot.WinForms.FormsPlot();
             ((System.ComponentModel.ISupportInitialize)(this.splitMain)).BeginInit();
             this.splitMain.Panel1.SuspendLayout();
             this.splitMain.Panel2.SuspendLayout();
@@ -91,6 +94,7 @@ namespace ImpinjR700
             this.tableStats.SuspendLayout();
             this.groupEpcSelection.SuspendLayout();
             this.tabChart.SuspendLayout();
+            this.tabPhase.SuspendLayout();
             this.SuspendLayout();
             // 
             // splitMain
@@ -226,6 +230,7 @@ namespace ImpinjR700
             // 
             // groupControl
             // 
+            this.groupControl.Controls.Add(this.buttonTestSignal);
             this.groupControl.Controls.Add(this.buttonAntennaConfig);
             this.groupControl.Controls.Add(this.checkedListAntennas);
             this.groupControl.Controls.Add(this.labelAntennaSelection);
@@ -239,6 +244,15 @@ namespace ImpinjR700
             this.groupControl.TabIndex = 1;
             this.groupControl.TabStop = false;
             this.groupControl.Text = "读取控制";
+            // 
+            // buttonTestSignal
+            // 
+            this.buttonTestSignal.Location = new System.Drawing.Point(200, 12);
+            this.buttonTestSignal.Name = "buttonTestSignal";
+            this.buttonTestSignal.Size = new System.Drawing.Size(120, 30);
+            this.buttonTestSignal.TabIndex = 7;
+            this.buttonTestSignal.Text = "测试信号";
+            this.buttonTestSignal.UseVisualStyleBackColor = true;
             // 
             // checkPlotSelectionOnly
             // 
@@ -414,7 +428,7 @@ namespace ImpinjR700
             // 
             // columnPhase
             // 
-            this.columnPhase.HeaderText = "相位 (°)";
+            this.columnPhase.HeaderText = "相位 (rad)";
             this.columnPhase.Name = "columnPhase";
             this.columnPhase.ReadOnly = true;
             // 
@@ -441,6 +455,7 @@ namespace ImpinjR700
             this.tabBottom.Controls.Add(this.tabLog);
             this.tabBottom.Controls.Add(this.tabStatistics);
             this.tabBottom.Controls.Add(this.tabChart);
+            this.tabBottom.Controls.Add(this.tabPhase);
             this.tabBottom.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tabBottom.Location = new System.Drawing.Point(0, 0);
             this.tabBottom.Name = "tabBottom";
@@ -543,7 +558,7 @@ namespace ImpinjR700
             // columnStatName
             // 
             this.columnStatName.Text = "指标";
-            this.columnStatName.Width = 280;
+            this.columnStatName.Width = 420;
             // 
             // columnStatValue
             // 
@@ -569,6 +584,26 @@ namespace ImpinjR700
             this.formsPlotRssi.Name = "formsPlotRssi";
             this.formsPlotRssi.Size = new System.Drawing.Size(1086, 180);
             this.formsPlotRssi.TabIndex = 0;
+            // 
+            // tabPhase
+            // 
+            this.tabPhase.Controls.Add(this.formsPlotPhase);
+            this.tabPhase.Location = new System.Drawing.Point(4, 26);
+            this.tabPhase.Name = "tabPhase";
+            this.tabPhase.Padding = new System.Windows.Forms.Padding(3);
+            this.tabPhase.Size = new System.Drawing.Size(1092, 186);
+            this.tabPhase.TabIndex = 3;
+            this.tabPhase.Text = "相位曲线";
+            this.tabPhase.UseVisualStyleBackColor = true;
+            // 
+            // formsPlotPhase
+            // 
+            this.formsPlotPhase.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.formsPlotPhase.Location = new System.Drawing.Point(3, 3);
+            this.formsPlotPhase.Margin = new System.Windows.Forms.Padding(0);
+            this.formsPlotPhase.Name = "formsPlotPhase";
+            this.formsPlotPhase.Size = new System.Drawing.Size(1086, 180);
+            this.formsPlotPhase.TabIndex = 0;
             // 
             // Form1
             // 
@@ -602,6 +637,7 @@ namespace ImpinjR700
             this.groupEpcSelection.ResumeLayout(false);
             this.groupEpcSelection.PerformLayout();
             this.tabChart.ResumeLayout(false);
+            this.tabPhase.ResumeLayout(false);
             this.ResumeLayout(false);
 
         }
@@ -620,6 +656,7 @@ namespace ImpinjR700
         private System.Windows.Forms.TextBox textReaderIp;
         private System.Windows.Forms.Label labelReaderIp;
         private System.Windows.Forms.GroupBox groupControl;
+        private System.Windows.Forms.Button buttonTestSignal;
         private System.Windows.Forms.CheckBox checkPlotSelectionOnly;
         private System.Windows.Forms.Button buttonAntennaConfig;
         private System.Windows.Forms.CheckedListBox checkedListAntennas;
@@ -653,5 +690,7 @@ namespace ImpinjR700
         private System.Windows.Forms.CheckedListBox checkedListEpcSelection;
         private System.Windows.Forms.TabPage tabChart;
         private ScottPlot.WinForms.FormsPlot formsPlotRssi;
+        private System.Windows.Forms.TabPage tabPhase;
+        private ScottPlot.WinForms.FormsPlot formsPlotPhase;
     }
 }
