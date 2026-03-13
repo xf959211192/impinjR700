@@ -71,7 +71,10 @@ namespace ImpinjR700
             this.tableStats = new System.Windows.Forms.TableLayoutPanel();
             this.listStatistics = new System.Windows.Forms.ListView();
             this.columnStatName = new System.Windows.Forms.ColumnHeader();
-            this.columnStatValue = new System.Windows.Forms.ColumnHeader();
+            this.columnStatCurrent = new System.Windows.Forms.ColumnHeader();
+            this.columnStatVariance = new System.Windows.Forms.ColumnHeader();
+            this.columnStatMean = new System.Windows.Forms.ColumnHeader();
+            this.columnStatPeak = new System.Windows.Forms.ColumnHeader();
             this.groupEpcSelection = new System.Windows.Forms.GroupBox();
             this.checkedListEpcSelection = new System.Windows.Forms.CheckedListBox();
             this.tabChart = new System.Windows.Forms.TabPage();
@@ -251,7 +254,7 @@ namespace ImpinjR700
             this.buttonTestSignal.Name = "buttonTestSignal";
             this.buttonTestSignal.Size = new System.Drawing.Size(120, 30);
             this.buttonTestSignal.TabIndex = 7;
-            this.buttonTestSignal.Text = "测试信号";
+            this.buttonTestSignal.Text = "模拟测试信号";
             this.buttonTestSignal.UseVisualStyleBackColor = true;
             // 
             // checkPlotSelectionOnly
@@ -413,6 +416,7 @@ namespace ImpinjR700
             this.columnEpc.HeaderText = "EPC";
             this.columnEpc.Name = "columnEpc";
             this.columnEpc.ReadOnly = true;
+            this.columnEpc.FillWeight = 180F;
             // 
             // columnAntenna
             // 
@@ -509,7 +513,7 @@ namespace ImpinjR700
             this.tableStats.Location = new System.Drawing.Point(3, 3);
             this.tableStats.Name = "tableStats";
             this.tableStats.RowCount = 2;
-            this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 100F));
+            this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 160F));
             this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100F));
             this.tableStats.Size = new System.Drawing.Size(1086, 180);
             this.tableStats.TabIndex = 1;
@@ -518,7 +522,10 @@ namespace ImpinjR700
             // 
             this.listStatistics.Columns.AddRange(new System.Windows.Forms.ColumnHeader[] {
             this.columnStatName,
-            this.columnStatValue});
+            this.columnStatCurrent,
+            this.columnStatVariance,
+            this.columnStatMean,
+            this.columnStatPeak});
             this.listStatistics.Dock = System.Windows.Forms.DockStyle.Fill;
             this.listStatistics.FullRowSelect = true;
             this.listStatistics.GridLines = true;
@@ -560,10 +567,25 @@ namespace ImpinjR700
             this.columnStatName.Text = "指标";
             this.columnStatName.Width = 420;
             // 
-            // columnStatValue
+            // columnStatCurrent
             // 
-            this.columnStatValue.Text = "当前值";
-            this.columnStatValue.Width = 280;
+            this.columnStatCurrent.Text = "当前值";
+            this.columnStatCurrent.Width = 140;
+            // 
+            // columnStatVariance
+            // 
+            this.columnStatVariance.Text = "RSSI 方差";
+            this.columnStatVariance.Width = 140;
+            // 
+            // columnStatMean
+            // 
+            this.columnStatMean.Text = "RSSI 均值";
+            this.columnStatMean.Width = 140;
+            // 
+            // columnStatPeak
+            // 
+            this.columnStatPeak.Text = "RSSI 峰值";
+            this.columnStatPeak.Width = 140;
             // 
             // tabChart
             // 
@@ -685,7 +707,10 @@ namespace ImpinjR700
         private System.Windows.Forms.TableLayoutPanel tableStats;
         private System.Windows.Forms.ListView listStatistics;
         private System.Windows.Forms.ColumnHeader columnStatName;
-        private System.Windows.Forms.ColumnHeader columnStatValue;
+        private System.Windows.Forms.ColumnHeader columnStatCurrent;
+        private System.Windows.Forms.ColumnHeader columnStatVariance;
+        private System.Windows.Forms.ColumnHeader columnStatMean;
+        private System.Windows.Forms.ColumnHeader columnStatPeak;
         private System.Windows.Forms.GroupBox groupEpcSelection;
         private System.Windows.Forms.CheckedListBox checkedListEpcSelection;
         private System.Windows.Forms.TabPage tabChart;

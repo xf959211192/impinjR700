@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -17,40 +18,88 @@ namespace ImpinjR700
     public partial class Form1 : Form
     {
         private ImpinjReader? _reader;
-        private readonly List<TagReadRecord> _renderCache = new();
         private readonly object _cacheLock = new();
         private readonly BindingList<TagReadRecord> _readHistoryBinding;
         private readonly Dictionary<string, TagViewModel> _tagIndex = new();
         private DateTime? _plotStartTime;
         private ListViewItem? _statUniqueTagsItem;
-        private ListViewItem? _statTotalReadsItem;
-        private long _totalReadCount;
         private string? _readerAddress;
         private bool _isReading;
         private CancellationTokenSource? _reconnectCts;
         private bool _isExporting;
         private bool _suppressAntennaAutoSave;
-        private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromSeconds(60);
-        private const double PlotDisplayWindowSeconds = 60;
-        private const double PlotGapThresholdSeconds = 3;
-        private const int MaxPlotPointsPerSeries = 0;
+        private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan StatisticsRefreshInterval = TimeSpan.FromMilliseconds(250);
+        private const double PlotDisplayWindowSeconds = 30;
+        private static readonly int MaxPlotPointsPerSeries = 0;
+        private static readonly int MaxReadHistoryRecords = 0;
         private static readonly TimeSpan PlotRenderThrottleInterval = TimeSpan.FromMilliseconds(50);
+        private static readonly TimeSpan TagProcessInterval = TimeSpan.FromMilliseconds(20);
+        private const int MaxTagProcessBatchSize = 800;
+        private static readonly TimeSpan SoundAlertMinInterval = TimeSpan.FromMilliseconds(800);
+        private const int SoundAlertBeepFrequency = 1400;
+        private const int SoundAlertBeepDurationMs = 90;
         private const string PlotFontName = "Microsoft YaHei";
+        private static readonly ScottPlot.Color[] PlotSeriesPalette = ScottPlot.Color.FromHex(new[]
+        {
+            "#1F77B4",
+            "#FF7F0E",
+            "#2CA02C",
+            "#D62728",
+            "#9467BD",
+            "#8C564B",
+            "#E377C2",
+            "#7F7F7F",
+            "#BCBD22",
+            "#17BECF"
+        });
         private static readonly string AntennaSelectionFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ImpinjR700",
             "antenna-selection.txt");
         private readonly System.Windows.Forms.Timer _plotRenderTimer;
+        private readonly System.Windows.Forms.Timer _statisticsRefreshTimer;
+        private readonly System.Windows.Forms.Timer _soundAlertTimer;
+        private readonly System.Windows.Forms.Timer _tagProcessTimer;
         private readonly System.Windows.Forms.Timer _signalTestTimer;
         private readonly Random _signalNoiseRandom = new();
+        private readonly ConcurrentQueue<PendingTagReportItem> _pendingTagQueue = new();
         private bool _plotRenderPending;
+        private bool _statisticsRefreshPending;
+        private bool _soundAlertPending;
         private DateTime _lastPlotRenderTime = DateTime.MinValue;
-        private bool _readHistorySortDescending = true;
+        private DateTime _lastStatisticsRefreshTime = DateTime.MinValue;
+        private bool _plotFollowLatest = true;
+        private bool _forceFollowLatestOnNextRender;
+        private double _manualPlotAxisLeft;
+        private double _manualPlotAxisRight = PlotDisplayWindowSeconds;
+        private double _manualRssiAxisBottom = double.NaN;
+        private double _manualRssiAxisTop = double.NaN;
+        private double _manualPhaseAxisBottom = double.NaN;
+        private double _manualPhaseAxisTop = double.NaN;
+        private double _lastAutoPlotAxisLeft;
+        private double _lastAutoPlotAxisRight = PlotDisplayWindowSeconds;
+        private bool _readHistorySortDescending = false;
         private bool _isUpdatingEpcSelection;
         private bool _isSignalTestRunning;
         private DateTime _signalTestStartTime = DateTime.MinValue;
+        private DateTime _lastSoundAlertTime = DateTime.MinValue;
+        private int _soundAlertPlaying;
+        private int _tagProcessScheduled;
+        private int _reconnectLoopActive;
+        private bool _soundAlertEnabled = true;
+        private readonly HashSet<string> _selectedPlotEpcs = new(StringComparer.Ordinal);
+        private readonly Dictionary<PlotSeriesKey, ScottPlot.Color> _plotSeriesColors = new();
         private readonly Dictionary<string, ushort> _signalReadCountByEpc = new();
         private readonly CheckBox _checkShowLegend = new();
+        private readonly CheckBox _checkSoundAlert = new();
+        private readonly TableLayoutPanel _tableEpcFilter = new();
+        private readonly FlowLayoutPanel _panelEpcFilterMode = new();
+        private readonly Label _labelEpcFilterMode = new();
+        private readonly ComboBox _comboEpcFilterMode = new();
+        private readonly Button _buttonSelectAllEpcs = new();
+        private readonly Button _buttonClearEpcs = new();
+        private readonly Button _buttonInvertEpcs = new();
         private readonly SimulatedEpcProfile[] _simulatedEpcProfiles =
         {
             new("E2000017221101441890ABCD", -57.5, 0.0, 0.0),
@@ -60,15 +109,33 @@ namespace ImpinjR700
         };
         private static readonly ushort[] SimulatedAntennaPorts = { 1, 2 };
 
+        private enum EpcFilterMode
+        {
+            Whitelist = 0,
+            Blacklist = 1
+        }
+
         public Form1()
         {
             InitializeComponent();
-            _readHistoryBinding = new BindingList<TagReadRecord>(_renderCache);
+            _readHistoryBinding = new BindingList<TagReadRecord>();
             _plotRenderTimer = new System.Windows.Forms.Timer
             {
                 Interval = (int)PlotRenderThrottleInterval.TotalMilliseconds
             };
             _plotRenderTimer.Tick += PlotRenderTimer_Tick;
+            _statisticsRefreshTimer = new System.Windows.Forms.Timer
+            {
+                Interval = (int)StatisticsRefreshInterval.TotalMilliseconds
+            };
+            _statisticsRefreshTimer.Tick += StatisticsRefreshTimer_Tick;
+            _soundAlertTimer = new System.Windows.Forms.Timer();
+            _soundAlertTimer.Tick += SoundAlertTimer_Tick;
+            _tagProcessTimer = new System.Windows.Forms.Timer
+            {
+                Interval = (int)TagProcessInterval.TotalMilliseconds
+            };
+            _tagProcessTimer.Tick += TagProcessTimer_Tick;
             _signalTestTimer = new System.Windows.Forms.Timer
             {
                 Interval = 60
@@ -100,8 +167,7 @@ namespace ImpinjR700
             plot.Axes.Left.Label.FontName = PlotFontName;
             plot.Axes.Left.TickLabelStyle.FontName = PlotFontName;
 
-            plot.Axes.SetLimitsX(0, PlotDisplayWindowSeconds);
-            ClampXAxisToZero(plot);
+            ApplyForwardXAxisLimits(plot, 0, PlotDisplayWindowSeconds);
         }
 
         /// <summary>
@@ -111,14 +177,60 @@ namespace ImpinjR700
         {
             if (splitMain.Height > 0)
             {
-                splitMain.SplitterDistance = splitMain.Height / 2;
+                var headerHeight = tableHeader.Height > 0 ? tableHeader.Height : 160;
+                var columnHeaderHeight = gridTags.ColumnHeadersHeight > 0 ? gridTags.ColumnHeadersHeight : 28;
+                var targetGridHeight = columnHeaderHeight + (gridTags.RowTemplate.Height * 5) + 8;
+                var desiredTopHeight = headerHeight + targetGridHeight + 12;
+                var maxTopHeight = Math.Max(120, splitMain.Height - splitMain.Panel2MinSize - splitMain.SplitterWidth);
+                splitMain.SplitterDistance = Math.Min(desiredTopHeight, maxTopHeight);
             }
         }
 
         private void ResetPlotData()
         {
             _plotStartTime = null;
+            _plotFollowLatest = true;
+            _forceFollowLatestOnNextRender = false;
+            _manualPlotAxisLeft = 0;
+            _manualPlotAxisRight = PlotDisplayWindowSeconds;
+            _manualRssiAxisBottom = double.NaN;
+            _manualRssiAxisTop = double.NaN;
+            _manualPhaseAxisBottom = double.NaN;
+            _manualPhaseAxisTop = double.NaN;
+            _lastAutoPlotAxisLeft = 0;
+            _lastAutoPlotAxisRight = PlotDisplayWindowSeconds;
+            ResetSoundAlertState();
             ConfigurePlot();
+        }
+
+        private void ConfigurePlotContextMenus()
+        {
+            ConfigureSinglePlotContextMenu(formsPlotRssi);
+            ConfigureSinglePlotContextMenu(formsPlotPhase);
+        }
+
+        private void ConfigureSinglePlotContextMenu(ScottPlot.WinForms.FormsPlot plotControl)
+        {
+            if (plotControl.Menu == null)
+            {
+                return;
+            }
+
+            plotControl.Menu.AddSeparator();
+            plotControl.Menu.Add("回到跟随状态", _ => ReturnToPlotFollowState());
+        }
+
+        private void ReturnToPlotFollowState()
+        {
+            _plotFollowLatest = true;
+            _forceFollowLatestOnNextRender = true;
+            _manualPlotAxisLeft = 0;
+            _manualPlotAxisRight = PlotDisplayWindowSeconds;
+            _manualRssiAxisBottom = double.NaN;
+            _manualRssiAxisTop = double.NaN;
+            _manualPhaseAxisBottom = double.NaN;
+            _manualPhaseAxisTop = double.NaN;
+            RequestPlotRender();
         }
 
         /// <summary>
@@ -150,11 +262,12 @@ namespace ImpinjR700
             gridTags.ClearSelection();
             EnableGridDoubleBuffer(gridTags);
 
-            _readHistoryBinding.ListChanged += (_, _) => UpdateExportButtons();
             checkedListEpcSelection.ItemCheck += CheckedListEpcSelection_ItemCheck;
 
             ConfigureStatisticsView();
+            ConfigureEpcFilterControls();
             ResetPlotData();
+            ConfigurePlotContextMenus();
 
             splitMain.SizeChanged += SplitMain_SizeChanged;
             SplitMain_SizeChanged(null, EventArgs.Empty);
@@ -188,18 +301,35 @@ namespace ImpinjR700
                 _checkShowLegend.UseVisualStyleBackColor = true;
                 _checkShowLegend.CheckedChanged += (_, _) => RequestPlotRender();
                 groupExport.Controls.Add(_checkShowLegend);
+
+                _checkSoundAlert.AutoSize = true;
+                _checkSoundAlert.Name = "checkSoundAlert";
+                _checkSoundAlert.Text = "蜂鸣提示";
+                _checkSoundAlert.Checked = _soundAlertEnabled;
+                _checkSoundAlert.UseVisualStyleBackColor = true;
+                _checkSoundAlert.CheckedChanged += (_, _) =>
+                {
+                    SetSoundAlertEnabled(_checkSoundAlert.Checked);
+                };
+                groupExport.Controls.Add(_checkSoundAlert);
+
                 groupExport.SizeChanged += (_, _) => UpdateLegendToggleLayout();
                 checkPlotSelectionOnly.SizeChanged += (_, _) => UpdateLegendToggleLayout();
                 checkPlotSelectionOnly.LocationChanged += (_, _) => UpdateLegendToggleLayout();
                 UpdateLegendToggleLayout();
             }
             RefreshEpcSelectionList();
+            RefreshSelectedPlotEpcsCache();
             FormClosing += (_, _) =>
             {
                 StopSignalTest(logStop: false);
                 CancelReconnect();
                 Disconnect();
                 _plotRenderTimer.Stop();
+                _statisticsRefreshTimer.Stop();
+                _soundAlertTimer.Stop();
+                _tagProcessTimer.Stop();
+                ResetPendingTagQueue();
             };
 
             checkedListAntennas.Enabled = true;
@@ -218,10 +348,74 @@ namespace ImpinjR700
         private void ConfigureStatisticsView()
         {
             listStatistics.Items.Clear();
-            _statUniqueTagsItem = new ListViewItem(new[] { "唯一标签数", "0" });
-            _statTotalReadsItem = new ListViewItem(new[] { "累计读取次数", "0" });
+            _statUniqueTagsItem = new ListViewItem(new[] { "唯一标签数", "0", string.Empty, string.Empty, string.Empty });
             listStatistics.Items.Add(_statUniqueTagsItem);
-            listStatistics.Items.Add(_statTotalReadsItem);
+        }
+
+        /// <summary>
+        ///  初始化 EPC 筛选区域，支持白名单和黑名单两种模式。
+        /// </summary>
+        private void ConfigureEpcFilterControls()
+        {
+            if (_tableEpcFilter.Parent != null)
+            {
+                return;
+            }
+
+            checkPlotSelectionOnly.Text = "启用 EPC 筛选";
+            groupEpcSelection.Text = "EPC 筛选（用于绘图/统计）";
+
+            _labelEpcFilterMode.AutoSize = true;
+            _labelEpcFilterMode.Margin = new Padding(0, 6, 6, 0);
+            _labelEpcFilterMode.Text = "筛选模式：";
+
+            _comboEpcFilterMode.DropDownStyle = ComboBoxStyle.DropDownList;
+            _comboEpcFilterMode.Width = 190;
+            _comboEpcFilterMode.Items.Add("白名单（仅保留勾选）");
+            _comboEpcFilterMode.Items.Add("黑名单（排除勾选）");
+            _comboEpcFilterMode.SelectedIndex = 0;
+            _comboEpcFilterMode.SelectedIndexChanged += (_, _) => OnEpcSelectionCriteriaChanged();
+
+            ConfigureEpcSelectionActionButton(_buttonSelectAllEpcs, "全选", SelectAllEpcSelection);
+            ConfigureEpcSelectionActionButton(_buttonClearEpcs, "全不选", ClearEpcSelection);
+            ConfigureEpcSelectionActionButton(_buttonInvertEpcs, "反选", InvertEpcSelection);
+
+            _panelEpcFilterMode.AutoSize = true;
+            _panelEpcFilterMode.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _panelEpcFilterMode.Dock = DockStyle.Fill;
+            _panelEpcFilterMode.FlowDirection = FlowDirection.LeftToRight;
+            _panelEpcFilterMode.WrapContents = true;
+            _panelEpcFilterMode.Padding = new Padding(0, 0, 0, 4);
+            _panelEpcFilterMode.Controls.Add(_labelEpcFilterMode);
+            _panelEpcFilterMode.Controls.Add(_comboEpcFilterMode);
+            _panelEpcFilterMode.Controls.Add(_buttonSelectAllEpcs);
+            _panelEpcFilterMode.Controls.Add(_buttonClearEpcs);
+            _panelEpcFilterMode.Controls.Add(_buttonInvertEpcs);
+
+            _tableEpcFilter.ColumnCount = 1;
+            _tableEpcFilter.RowCount = 2;
+            _tableEpcFilter.Dock = DockStyle.Fill;
+            _tableEpcFilter.Margin = Padding.Empty;
+            _tableEpcFilter.Padding = Padding.Empty;
+            _tableEpcFilter.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _tableEpcFilter.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            groupEpcSelection.Controls.Remove(checkedListEpcSelection);
+            checkedListEpcSelection.Dock = DockStyle.Fill;
+            _tableEpcFilter.Controls.Add(_panelEpcFilterMode, 0, 0);
+            _tableEpcFilter.Controls.Add(checkedListEpcSelection, 0, 1);
+            groupEpcSelection.Controls.Add(_tableEpcFilter);
+        }
+
+        private static void ConfigureEpcSelectionActionButton(Button button, string text, EventHandler onClick)
+        {
+            button.AutoSize = true;
+            button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            button.Margin = new Padding(6, 0, 0, 0);
+            button.Padding = new Padding(8, 0, 8, 0);
+            button.Text = text;
+            button.UseVisualStyleBackColor = true;
+            button.Click += onClick;
         }
 
         /// <summary>
@@ -425,6 +619,7 @@ namespace ImpinjR700
             }
 
             TryStopReader();
+            ResetPendingTagQueue();
             _isReading = false;
 
             UpdateStatus("已连接", Color.DarkGreen);
@@ -938,7 +1133,19 @@ namespace ImpinjR700
                 return;
             }
 
-            BeginInvoke(new Action(() => ProcessTagReport(report)));
+            foreach (Tag tag in report)
+            {
+                _pendingTagQueue.Enqueue(new PendingTagReportItem(
+                    tag.Epc.ToString(),
+                    tag.AntennaPortNumber,
+                    tag.PeakRssiInDbm,
+                    ExtractPhaseRadians(tag),
+                    tag.TagSeenCount,
+                    SafeToLocal(tag.FirstSeenTime),
+                    SafeToLocal(tag.LastSeenTime)));
+            }
+
+            RequestPendingTagProcessing();
         }
 
         /// <summary>
@@ -948,16 +1155,21 @@ namespace ImpinjR700
         /// <summary>
         ///  在 UI 线程处理标签数据。
         /// </summary>
-        private void ProcessTagReport(TagReport report)
+        private void ProcessPendingTagBatch(IReadOnlyList<PendingTagReportItem> batch)
         {
-            var plotUpdated = false;
             var epcListChanged = false;
+            var newRecords = new List<TagReadRecord>();
 
-            foreach (Tag tag in report)
+            foreach (var item in batch)
             {
-                var epc = tag.Epc.ToString();
-                var firstSeen = SafeToLocal(tag.FirstSeenTime);
-                var lastSeen = SafeToLocal(tag.LastSeenTime);
+                var epc = item.Epc;
+                if (!ShouldCacheRecord(epc))
+                {
+                    continue;
+                }
+
+                var firstSeen = item.FirstSeen;
+                var lastSeen = item.LastSeen;
 
                 if (!_tagIndex.TryGetValue(epc, out var viewModel))
                 {
@@ -970,43 +1182,80 @@ namespace ImpinjR700
                 }
 
                 viewModel.LastSeen = lastSeen;
-                viewModel.Antenna = FormatAntenna(tag.AntennaPortNumber);
-                viewModel.Rssi = tag.PeakRssiInDbm;
-                viewModel.Phase = ExtractPhaseRadians(tag);
+                viewModel.Antenna = FormatAntenna(item.AntennaPort);
+                viewModel.Rssi = item.Rssi;
+                viewModel.Phase = item.Phase;
 
-                var reportedCount = tag.TagSeenCount;
+                var reportedCount = item.ReportedCount;
                 if (reportedCount <= 0 || reportedCount < viewModel.ReadCount)
                 {
                     reportedCount = (ushort)(viewModel.ReadCount + 1);
                 }
-                _totalReadCount += reportedCount - viewModel.ReadCount;
                 viewModel.ReadCount = reportedCount;
 
-                AddReadHistoryRecord(new TagReadRecord(
+                newRecords.Add(new TagReadRecord(
                     epc,
-                    tag.AntennaPortNumber,
-                    FormatAntenna(tag.AntennaPortNumber),
-                    tag.PeakRssiInDbm,
+                    item.AntennaPort,
+                    FormatAntenna(item.AntennaPort),
+                    item.Rssi,
                     viewModel.Phase,
                     reportedCount,
                     firstSeen,
                     lastSeen));
-
-                plotUpdated = true;
             }
 
-            if (plotUpdated)
-            {
-                RequestPlotRender();
-            }
+            AddReadHistoryRecords(newRecords);
 
             if (epcListChanged)
             {
                 RefreshEpcSelectionList();
             }
 
-            UpdateStatistics();
+            RequestStatisticsRefresh();
             UpdateExportButtons();
+        }
+
+        private void RequestPendingTagProcessing()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _tagProcessScheduled, 1) == 1)
+            {
+                return;
+            }
+
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed || !IsHandleCreated || _tagProcessTimer.Enabled)
+                {
+                    return;
+                }
+
+                _tagProcessTimer.Start();
+            }));
+        }
+
+        private void TagProcessTimer_Tick(object? sender, EventArgs e)
+        {
+            var batch = new List<PendingTagReportItem>(MaxTagProcessBatchSize);
+            while (batch.Count < MaxTagProcessBatchSize &&
+                   _pendingTagQueue.TryDequeue(out var item))
+            {
+                batch.Add(item);
+            }
+
+            if (batch.Count > 0)
+            {
+                ProcessPendingTagBatch(batch);
+            }
+
+            if (_pendingTagQueue.IsEmpty)
+            {
+                _tagProcessTimer.Stop();
+                System.Threading.Interlocked.Exchange(ref _tagProcessScheduled, 0);
+                if (!_pendingTagQueue.IsEmpty)
+                {
+                    RequestPendingTagProcessing();
+                }
+            }
         }
 
         private void OnPlotSelectionFilterChanged()
@@ -1016,11 +1265,39 @@ namespace ImpinjR700
                 gridTags.ClearSelection();
             }
 
+            OnEpcSelectionCriteriaChanged();
+        }
+
+        private void OnEpcSelectionCriteriaChanged()
+        {
+            RefreshSelectedPlotEpcsCache();
+            PruneReadHistoryByCurrentFilter();
+            RequestStatisticsRefresh();
             RequestPlotRender();
+            UpdateExportButtons();
         }
 
         private void AddReadHistoryRecord(TagReadRecord record)
         {
+            AddReadHistoryRecords(new[] { record });
+        }
+
+        /// <summary>
+        ///  批量写入表格绑定的历史记录数据源，减少高频标签上报时的表格刷新次数。
+        /// </summary>
+        private void AddReadHistoryRecords(IReadOnlyList<TagReadRecord> records)
+        {
+            if (records.Count == 0)
+            {
+                return;
+            }
+
+            var recordsToCache = FilterRecordsForCaching(records);
+            if (recordsToCache.Count == 0)
+            {
+                return;
+            }
+
             var preserveSelection = gridTags.Focused && gridTags.SelectedRows.Count > 0;
             TagReadRecord? selectedRecord = null;
             var firstDisplayedRowIndex = -1;
@@ -1032,38 +1309,38 @@ namespace ImpinjR700
 
             lock (_cacheLock)
             {
-                var insertIndex = 0;
-
-                while (insertIndex < _renderCache.Count)
+                _readHistoryBinding.RaiseListChangedEvents = false;
+                try
                 {
-                    var existing = _renderCache[insertIndex];
-                    var comparison = DateTime.Compare(existing.LastSeen, record.LastSeen);
-
-                    if (_readHistorySortDescending)
+                    foreach (var record in recordsToCache)
                     {
-                        if (comparison <= 0)
-                        {
-                            break;
-                        }
+                        var insertIndex = FindInsertIndex(record.LastSeen);
+                        _readHistoryBinding.Insert(insertIndex, record);
+                        TrimReadHistoryIfNeeded();
                     }
-                    else
-                    {
-                        if (comparison >= 0)
-                        {
-                            break;
-                        }
-                    }
-
-                    insertIndex++;
                 }
-
-                _readHistoryBinding.Insert(insertIndex, record);
+                finally
+                {
+                    _readHistoryBinding.RaiseListChangedEvents = true;
+                }
             }
+
+            _readHistoryBinding.ResetBindings();
+
+            foreach (var record in recordsToCache)
+            {
+                TryBeepAlert(record);
+            }
+
+            RequestPlotRender();
 
             if (preserveSelection && selectedRecord != null)
             {
                 RestoreGridSelection(selectedRecord, firstDisplayedRowIndex);
+                return;
             }
+
+            ScrollGridToLatestRow();
         }
 
         private void RestoreGridSelection(TagReadRecord selectedRecord, int firstDisplayedRowIndex)
@@ -1098,6 +1375,20 @@ namespace ImpinjR700
             }
         }
 
+        private void ScrollGridToLatestRow()
+        {
+            if (gridTags.RowCount == 0)
+            {
+                return;
+            }
+
+            var latestRowIndex = gridTags.RowCount - 1;
+            if (latestRowIndex >= 0)
+            {
+                gridTags.FirstDisplayedScrollingRowIndex = latestRowIndex;
+            }
+        }
+
         private static void EnableGridDoubleBuffer(DataGridView grid)
         {
             var property = typeof(DataGridView).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -1114,7 +1405,7 @@ namespace ImpinjR700
 
             if (_isReading)
             {
-                MessageBox.Show(this, "当前正在真实读取，请先停止读取后再启动测试信号。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "当前正在真实读取，请先停止读取后再启动模拟测试信号。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -1126,8 +1417,8 @@ namespace ImpinjR700
             _signalTestStartTime = DateTime.Now;
             _signalReadCountByEpc.Clear();
             _isSignalTestRunning = true;
-            buttonTestSignal.Text = "停止测试";
-            AppendLog("测试信号已启动。");
+            buttonTestSignal.Text = "停止模拟测试";
+            AppendLog("模拟测试信号已启动。");
             _signalTestTimer.Start();
         }
 
@@ -1140,10 +1431,10 @@ namespace ImpinjR700
 
             _signalTestTimer.Stop();
             _isSignalTestRunning = false;
-            buttonTestSignal.Text = "测试信号";
+            buttonTestSignal.Text = "模拟测试信号";
             if (logStop)
             {
-                AppendLog("测试信号已停止。");
+                AppendLog("模拟测试信号已停止。");
             }
         }
 
@@ -1162,6 +1453,7 @@ namespace ImpinjR700
             var now = DateTime.Now;
             var elapsedSeconds = (now - _signalTestStartTime).TotalSeconds;
             var epcListChanged = false;
+            var newRecords = new List<TagReadRecord>();
 
             foreach (var profile in _simulatedEpcProfiles)
             {
@@ -1172,6 +1464,7 @@ namespace ImpinjR700
                     epcListChanged |= EmitSimulatedSample(
                         now,
                         elapsedSeconds,
+                        newRecords,
                         profile.Epc,
                         antennaPort,
                         baseRssi: profile.BaseRssi + antennaBias,
@@ -1180,19 +1473,22 @@ namespace ImpinjR700
                 }
             }
 
+            AddReadHistoryRecords(newRecords);
+
             if (epcListChanged)
             {
                 RefreshEpcSelectionList();
             }
 
             RequestPlotRender();
-            UpdateStatistics();
+            RequestStatisticsRefresh();
             UpdateExportButtons();
         }
 
         private bool EmitSimulatedSample(
             DateTime now,
             double elapsedSeconds,
+            List<TagReadRecord> newRecords,
             string epc,
             ushort antennaPort,
             double baseRssi,
@@ -1204,6 +1500,11 @@ namespace ImpinjR700
             var noise = (_signalNoiseRandom.NextDouble() - 0.5) * 1.2;
             var rssi = Math.Clamp(baseRssi + periodic + fastRipple + noise, -82, -30);
             var phase = (elapsedSeconds * 1.8 + phaseShift) % (2 * Math.PI);
+
+            if (!ShouldCacheRecord(epc))
+            {
+                return false;
+            }
 
             var isNewTag = !_tagIndex.TryGetValue(epc, out var viewModel);
             if (isNewTag)
@@ -1224,9 +1525,8 @@ namespace ImpinjR700
             viewModel.Rssi = rssi;
             viewModel.Phase = phase;
             viewModel.ReadCount = nextCount;
-            _totalReadCount++;
 
-            AddReadHistoryRecord(new TagReadRecord(
+            newRecords.Add(new TagReadRecord(
                 epc,
                 antennaPort,
                 FormatAntenna(antennaPort),
@@ -1244,68 +1544,6 @@ namespace ImpinjR700
             double BaseRssi,
             double RssiPhaseShift,
             double PhaseShift);
-
-        private void RequestPlotRender()
-        {
-            var now = DateTime.UtcNow;
-
-            if (now - _lastPlotRenderTime >= PlotRenderThrottleInterval || !_plotStartTime.HasValue)
-            {
-                RenderPlot();
-                return;
-            }
-
-            if (_plotRenderPending)
-            {
-                return;
-            }
-
-            var delay = PlotRenderThrottleInterval - (now - _lastPlotRenderTime);
-            var intervalMs = Math.Max(1, (int)delay.TotalMilliseconds);
-
-            _plotRenderTimer.Stop();
-            _plotRenderTimer.Interval = intervalMs;
-            _plotRenderPending = true;
-            _plotRenderTimer.Start();
-        }
-
-        private List<TagReadRecord> BuildRenderableRecords()
-        {
-            List<TagReadRecord> snapshot;
-            lock (_cacheLock)
-            {
-                if (_renderCache.Count == 0)
-                {
-                    return new List<TagReadRecord>();
-                }
-
-                snapshot = _renderCache.ToList();
-            }
-
-            var selectedEpcs = GetSelectedEpcFilters();
-            var hasFilter = checkPlotSelectionOnly.Checked && selectedEpcs.Count > 0;
-            var hasRetentionLimit = PlotRetentionWindow > TimeSpan.Zero;
-            var cutoff = hasRetentionLimit ? DateTime.Now - PlotRetentionWindow : DateTime.MinValue;
-
-            var filtered = new List<TagReadRecord>(snapshot.Count);
-                foreach (var record in snapshot)
-            {
-                if (hasRetentionLimit && record.LastSeen < cutoff)
-                {
-                    continue;
-                }
-
-                if (hasFilter && !selectedEpcs.Contains(record.Epc))
-                {
-                    continue;
-                }
-
-                filtered.Add(record);
-            }
-
-            filtered.Sort(static (a, b) => DateTime.Compare(a.LastSeen, b.LastSeen));
-            return filtered;
-        }
 
         private static Dictionary<PlotSeriesKey, List<TagReadRecord>> GroupRecordsBySeries(IEnumerable<TagReadRecord> records)
         {
@@ -1355,6 +1593,41 @@ namespace ImpinjR700
             return result;
         }
 
+        /// <summary>
+        ///  根据当前 EPC 筛选决定记录是否允许进入表格绑定数据源。
+        /// </summary>
+        private bool ShouldCacheRecord(string epc)
+        {
+            if (!checkPlotSelectionOnly.Checked)
+            {
+                return true;
+            }
+
+            return IsEpcIncludedByFilter(epc, _selectedPlotEpcs, GetCurrentEpcFilterMode());
+        }
+
+        /// <summary>
+        ///  仅保留当前筛选命中的记录，避免未参与绘图的数据继续进入表格绑定数据源。
+        /// </summary>
+        private List<TagReadRecord> FilterRecordsForCaching(IReadOnlyList<TagReadRecord> records)
+        {
+            if (!checkPlotSelectionOnly.Checked)
+            {
+                return records as List<TagReadRecord> ?? new List<TagReadRecord>(records);
+            }
+
+            var filtered = new List<TagReadRecord>(records.Count);
+            foreach (var record in records)
+            {
+                if (ShouldCacheRecord(record.Epc))
+                {
+                    filtered.Add(record);
+                }
+            }
+
+            return filtered;
+        }
+
         private void RefreshEpcSelectionList()
         {
             _isUpdatingEpcSelection = true;
@@ -1376,14 +1649,44 @@ namespace ImpinjR700
 
         private void ClearEpcSelection()
         {
+            SetAllEpcSelection(false);
+        }
+
+        private void SelectAllEpcSelection(object? sender, EventArgs e)
+        {
+            SetAllEpcSelection(true);
+        }
+
+        private void ClearEpcSelection(object? sender, EventArgs e)
+        {
+            SetAllEpcSelection(false);
+        }
+
+        private void InvertEpcSelection(object? sender, EventArgs e)
+        {
             _isUpdatingEpcSelection = true;
             checkedListEpcSelection.BeginUpdate();
             for (int i = 0; i < checkedListEpcSelection.Items.Count; i++)
             {
-                checkedListEpcSelection.SetItemChecked(i, false);
+                var shouldCheck = !checkedListEpcSelection.GetItemChecked(i);
+                checkedListEpcSelection.SetItemChecked(i, shouldCheck);
             }
             checkedListEpcSelection.EndUpdate();
             _isUpdatingEpcSelection = false;
+            OnEpcSelectionCriteriaChanged();
+        }
+
+        private void SetAllEpcSelection(bool isChecked)
+        {
+            _isUpdatingEpcSelection = true;
+            checkedListEpcSelection.BeginUpdate();
+            for (int i = 0; i < checkedListEpcSelection.Items.Count; i++)
+            {
+                checkedListEpcSelection.SetItemChecked(i, isChecked);
+            }
+            checkedListEpcSelection.EndUpdate();
+            _isUpdatingEpcSelection = false;
+            OnEpcSelectionCriteriaChanged();
         }
 
         private void CheckedListEpcSelection_ItemCheck(object? sender, ItemCheckEventArgs e)
@@ -1395,13 +1698,213 @@ namespace ImpinjR700
 
             BeginInvoke(new Action(() =>
             {
-                if (checkPlotSelectionOnly.Checked)
-                {
-                    RequestPlotRender();
-                }
+                OnEpcSelectionCriteriaChanged();
             }));
         }
 
+        /// <summary>
+        ///  根据时间戳使用二分法定位插入位置，避免标签量增大后线性扫描卡顿。
+        /// </summary>
+        private int FindInsertIndex(DateTime lastSeen)
+        {
+            if (_readHistoryBinding.Count == 0)
+            {
+                return 0;
+            }
+
+            if (_readHistorySortDescending)
+            {
+                if (lastSeen >= _readHistoryBinding[0].LastSeen)
+                {
+                    return 0;
+                }
+
+                if (lastSeen <= _readHistoryBinding[^1].LastSeen)
+                {
+                    return _readHistoryBinding.Count;
+                }
+            }
+            else
+            {
+                if (lastSeen <= _readHistoryBinding[0].LastSeen)
+                {
+                    return 0;
+                }
+
+                if (lastSeen >= _readHistoryBinding[^1].LastSeen)
+                {
+                    return _readHistoryBinding.Count;
+                }
+            }
+
+            var low = 0;
+            var high = _readHistoryBinding.Count;
+            while (low < high)
+            {
+                var mid = low + ((high - low) / 2);
+                var comparison = DateTime.Compare(_readHistoryBinding[mid].LastSeen, lastSeen);
+
+                if (_readHistorySortDescending)
+                {
+                    if (comparison <= 0)
+                    {
+                        high = mid;
+                    }
+                    else
+                    {
+                        low = mid + 1;
+                    }
+                }
+                else
+                {
+                    if (comparison >= 0)
+                    {
+                        high = mid;
+                    }
+                    else
+                    {
+                        low = mid + 1;
+                    }
+                }
+            }
+
+            return low;
+        }
+
+        /// <summary>
+        ///  限制表格绑定历史记录数量，避免标签量增大后表格和绘图无限膨胀。
+        /// </summary>
+        private void TrimReadHistoryIfNeeded()
+        {
+            if (MaxReadHistoryRecords <= 0)
+            {
+                return;
+            }
+
+            while (_readHistoryBinding.Count > MaxReadHistoryRecords)
+            {
+                _readHistoryBinding.RemoveAt(0);
+            }
+        }
+
+        /// <summary>
+        ///  在启用 EPC 筛选后，同步清理表格绑定数据源中不再参与绘图的历史记录。
+        /// </summary>
+        private void PruneReadHistoryByCurrentFilter()
+        {
+            if (!checkPlotSelectionOnly.Checked || _readHistoryBinding.Count == 0)
+            {
+                return;
+            }
+
+            lock (_cacheLock)
+            {
+                _readHistoryBinding.RaiseListChangedEvents = false;
+                try
+                {
+                    for (var index = _readHistoryBinding.Count - 1; index >= 0; index--)
+                    {
+                        if (!ShouldCacheRecord(_readHistoryBinding[index].Epc))
+                        {
+                            _readHistoryBinding.RemoveAt(index);
+                        }
+                    }
+                }
+                finally
+                {
+                    _readHistoryBinding.RaiseListChangedEvents = true;
+                }
+            }
+
+            _readHistoryBinding.ResetBindings();
+        }
+
+        /// <summary>
+        ///  记录当前选中的 EPC 筛选集合，避免高频蜂鸣和渲染判断反复分配集合。
+        /// </summary>
+        private void RefreshSelectedPlotEpcsCache()
+        {
+            _selectedPlotEpcs.Clear();
+            foreach (var item in checkedListEpcSelection.CheckedItems)
+            {
+                if (item is string epc)
+                {
+                    _selectedPlotEpcs.Add(epc);
+                }
+            }
+        }
+
+        private void RequestPlotRender()
+        {
+            var now = DateTime.UtcNow;
+
+            if (now - _lastPlotRenderTime >= PlotRenderThrottleInterval || !_plotStartTime.HasValue)
+            {
+                RenderPlot();
+                return;
+            }
+
+            if (_plotRenderPending)
+            {
+                return;
+            }
+
+            var delay = PlotRenderThrottleInterval - (now - _lastPlotRenderTime);
+            var intervalMs = Math.Max(1, (int)delay.TotalMilliseconds);
+
+            _plotRenderTimer.Stop();
+            _plotRenderTimer.Interval = intervalMs;
+            _plotRenderPending = true;
+            _plotRenderTimer.Start();
+        }
+
+        private List<TagReadRecord> BuildRenderableRecords()
+        {
+            List<TagReadRecord> snapshot;
+            lock (_cacheLock)
+            {
+                if (_readHistoryBinding.Count == 0)
+                {
+                    return new List<TagReadRecord>();
+                }
+
+                snapshot = _readHistoryBinding.ToList();
+            }
+
+            var selectedEpcs = GetSelectedEpcFilters();
+            var hasFilter = checkPlotSelectionOnly.Checked;
+            var filterMode = GetCurrentEpcFilterMode();
+            var filteredBySelection = snapshot
+                .Where(record => !hasFilter || IsEpcIncludedByFilter(record.Epc, selectedEpcs, filterMode))
+                .ToList();
+
+            if (filteredBySelection.Count == 0)
+            {
+                return new List<TagReadRecord>();
+            }
+
+            var filtered = new List<TagReadRecord>(filteredBySelection.Count);
+            foreach (var record in filteredBySelection)
+            {
+                filtered.Add(record);
+            }
+
+            filtered.Sort(static (a, b) => DateTime.Compare(a.LastSeen, b.LastSeen));
+            return filtered;
+        }
+
+        private static DateTime GetPlotWindowStart(IReadOnlyList<TagReadRecord> records)
+        {
+            if (records.Count == 0)
+            {
+                return DateTime.MinValue;
+            }
+
+            var windowEnd = records.Max(record => record.LastSeen);
+            return PlotRetentionWindow > TimeSpan.Zero
+                ? windowEnd - PlotRetentionWindow
+                : records.Min(record => record.LastSeen);
+        }
 
         private void RenderPlot()
         {
@@ -1411,6 +1914,14 @@ namespace ImpinjR700
 
             var rssiPlot = formsPlotRssi.Plot;
             var phasePlot = formsPlotPhase.Plot;
+            if (_forceFollowLatestOnNextRender)
+            {
+                _forceFollowLatestOnNextRender = false;
+            }
+            else
+            {
+                CapturePlotViewportPreference(rssiPlot, phasePlot);
+            }
             rssiPlot.Clear();
             phasePlot.Clear();
 
@@ -1418,8 +1929,8 @@ namespace ImpinjR700
             if (records.Count == 0)
             {
                 _plotStartTime = null;
-                ClampXAxisToZero(rssiPlot);
-                ClampXAxisToZero(phasePlot);
+                ApplyForwardXAxisLimits(rssiPlot, 0, PlotDisplayWindowSeconds);
+                ApplyForwardXAxisLimits(phasePlot, 0, PlotDisplayWindowSeconds);
                 formsPlotRssi.Refresh();
                 formsPlotPhase.Refresh();
                 return;
@@ -1429,20 +1940,42 @@ namespace ImpinjR700
             if (grouped.Count == 0)
             {
                 _plotStartTime = null;
-                ClampXAxisToZero(rssiPlot);
-                ClampXAxisToZero(phasePlot);
+                ApplyForwardXAxisLimits(rssiPlot, 0, PlotDisplayWindowSeconds);
+                ApplyForwardXAxisLimits(phasePlot, 0, PlotDisplayWindowSeconds);
                 formsPlotRssi.Refresh();
                 formsPlotPhase.Refresh();
                 return;
             }
 
-            var windowStart = DateTime.Now - PlotRetentionWindow;
-            var baseTime = records[0].LastSeen > windowStart
-                ? records[0].LastSeen
-                : windowStart;
-            _plotStartTime = baseTime;
+            if (!_plotStartTime.HasValue)
+            {
+                _plotStartTime = records.Min(record => record.LastSeen);
+            }
 
-            foreach (var entry in grouped)
+            var timeAxisStart = _plotStartTime.Value;
+            var latestRecordTime = records.Max(record => record.LastSeen);
+            var latestX = Math.Max(0, (latestRecordTime - timeAxisStart).TotalSeconds);
+            var axisLeft = PlotDisplayWindowSeconds > 0
+                ? Math.Max(0, latestX - PlotDisplayWindowSeconds)
+                : 0;
+            var axisRight = PlotDisplayWindowSeconds > 0
+                ? Math.Max(PlotDisplayWindowSeconds, latestX)
+                : latestX;
+            _lastAutoPlotAxisLeft = axisLeft;
+            _lastAutoPlotAxisRight = axisRight;
+
+            if (!_plotFollowLatest && _manualPlotAxisRight > _manualPlotAxisLeft)
+            {
+                axisLeft = _manualPlotAxisLeft;
+                axisRight = _manualPlotAxisRight;
+            }
+
+            var orderedEntries = grouped
+                .OrderBy(entry => entry.Key.Epc, StringComparer.Ordinal)
+                .ThenBy(entry => entry.Key.AntennaPort)
+                .ToList();
+
+            foreach (var entry in orderedEntries)
             {
                 var samples = entry.Value;
                 if (samples.Count == 0)
@@ -1451,50 +1984,39 @@ namespace ImpinjR700
                 }
 
                 var legendText = FormatPlotLegend(entry.Key);
+                var seriesColor = GetPlotSeriesColor(entry.Key);
 
-                var rssiSegments = SplitSamplesByGap(
+                var rssiSegments = SplitSamplesByValidity(
                     samples,
-                    PlotGapThresholdSeconds,
                     static sample => !double.IsNaN(sample.Rssi) && !double.IsInfinity(sample.Rssi));
-                ScottPlot.Color? rssiSeriesColor = null;
                 for (var i = 0; i < rssiSegments.Count; i++)
                 {
                     var segment = rssiSegments[i];
-                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - baseTime).TotalSeconds)).ToArray();
+                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - timeAxisStart).TotalSeconds)).ToArray();
                     var ys = segment.Select(sample => sample.Rssi).ToArray();
                     var rssiScatter = rssiPlot.Add.Scatter(xs, ys);
+                    rssiScatter.Color = seriesColor;
                     if (i == 0)
                     {
                         rssiScatter.LegendText = legendText;
-                        rssiSeriesColor = rssiScatter.Color;
-                    }
-                    else if (rssiSeriesColor.HasValue)
-                    {
-                        rssiScatter.Color = rssiSeriesColor.Value;
                     }
                     rssiScatter.MarkerSize = 3;
                     rssiScatter.LineWidth = 2;
                 }
 
-                var phaseSegments = SplitSamplesByGap(
+                var phaseSegments = SplitSamplesByValidity(
                     samples,
-                    PlotGapThresholdSeconds,
                     static sample => !double.IsNaN(sample.Phase) && !double.IsInfinity(sample.Phase));
-                ScottPlot.Color? phaseSeriesColor = null;
                 for (var i = 0; i < phaseSegments.Count; i++)
                 {
                     var segment = phaseSegments[i];
-                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - baseTime).TotalSeconds)).ToArray();
+                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - timeAxisStart).TotalSeconds)).ToArray();
                     var ys = segment.Select(sample => sample.Phase).ToArray();
                     var phaseScatter = phasePlot.Add.Scatter(xs, ys);
+                    phaseScatter.Color = seriesColor;
                     if (i == 0)
                     {
                         phaseScatter.LegendText = legendText;
-                        phaseSeriesColor = phaseScatter.Color;
-                    }
-                    else if (phaseSeriesColor.HasValue)
-                    {
-                        phaseScatter.Color = phaseSeriesColor.Value;
                     }
                     phaseScatter.MarkerSize = 2;
                     phaseScatter.LineWidth = 1.5f;
@@ -1504,14 +2026,115 @@ namespace ImpinjR700
 
             rssiPlot.Axes.AutoScale();
             phasePlot.Axes.AutoScale();
-            rssiPlot.Axes.SetLimitsX(0, PlotDisplayWindowSeconds);
-            phasePlot.Axes.SetLimitsX(0, PlotDisplayWindowSeconds);
+            ApplyForwardXAxisLimits(rssiPlot, axisLeft, axisRight);
+            ApplyForwardXAxisLimits(phasePlot, axisLeft, axisRight);
+            ApplyManualYAxisLimitsIfNeeded(rssiPlot, _manualRssiAxisBottom, _manualRssiAxisTop);
+            ApplyManualYAxisLimitsIfNeeded(phasePlot, _manualPhaseAxisBottom, _manualPhaseAxisTop);
             ApplyLegendVisibility(rssiPlot);
             ApplyLegendVisibility(phasePlot);
-            ClampXAxisToZero(rssiPlot);
-            ClampXAxisToZero(phasePlot);
             formsPlotRssi.Refresh();
             formsPlotPhase.Refresh();
+        }
+
+        private void CapturePlotViewportPreference(ScottPlot.Plot rssiPlot, ScottPlot.Plot phasePlot)
+        {
+            var rssiLimits = rssiPlot.Axes.GetLimits();
+            var phaseLimits = phasePlot.Axes.GetLimits();
+            if (!IsAxisLimitsValid(rssiLimits) || !IsAxisLimitsValid(phaseLimits))
+            {
+                return;
+            }
+
+            var rssiFollowsLatest = IsFollowingLatestViewport(rssiLimits);
+            var phaseFollowsLatest = IsFollowingLatestViewport(phaseLimits);
+            var followsLatest = rssiFollowsLatest && phaseFollowsLatest;
+
+            _plotFollowLatest = followsLatest;
+            if (!followsLatest)
+            {
+                var sourceLimits = SelectManualViewportSource(rssiLimits, phaseLimits);
+                _manualPlotAxisLeft = sourceLimits.Left;
+                _manualPlotAxisRight = sourceLimits.Right;
+                _manualRssiAxisBottom = rssiLimits.Bottom;
+                _manualRssiAxisTop = rssiLimits.Top;
+                _manualPhaseAxisBottom = phaseLimits.Bottom;
+                _manualPhaseAxisTop = phaseLimits.Top;
+            }
+        }
+
+        private bool IsFollowingLatestViewport(ScottPlot.AxisLimits limits)
+        {
+            return Math.Abs(limits.Left - _lastAutoPlotAxisLeft) < 0.5 &&
+                   Math.Abs(limits.Right - _lastAutoPlotAxisRight) < 0.5;
+        }
+
+        private static bool IsAxisLimitsValid(ScottPlot.AxisLimits limits)
+        {
+            return !double.IsNaN(limits.Left) &&
+                   !double.IsInfinity(limits.Left) &&
+                   !double.IsNaN(limits.Right) &&
+                   !double.IsInfinity(limits.Right) &&
+                   limits.Right > limits.Left;
+        }
+
+        private ScottPlot.AxisLimits SelectManualViewportSource(
+            ScottPlot.AxisLimits rssiLimits,
+            ScottPlot.AxisLimits phaseLimits)
+        {
+            var rssiDelta = Math.Abs(rssiLimits.Left - _lastAutoPlotAxisLeft) +
+                            Math.Abs(rssiLimits.Right - _lastAutoPlotAxisRight);
+            var phaseDelta = Math.Abs(phaseLimits.Left - _lastAutoPlotAxisLeft) +
+                             Math.Abs(phaseLimits.Right - _lastAutoPlotAxisRight);
+
+            return phaseDelta > rssiDelta ? phaseLimits : rssiLimits;
+        }
+
+        private static void ApplyManualYAxisLimitsIfNeeded(
+            ScottPlot.Plot plot,
+            double bottom,
+            double top)
+        {
+            if (double.IsNaN(bottom) || double.IsInfinity(bottom) ||
+                double.IsNaN(top) || double.IsInfinity(top) ||
+                top <= bottom)
+            {
+                return;
+            }
+
+            plot.Axes.SetLimitsY(bottom, top);
+        }
+
+        /// <summary>
+        ///  为每条 EPC+天线系列分配固定颜色，避免筛选切换后颜色漂移。
+        /// </summary>
+        private ScottPlot.Color GetPlotSeriesColor(PlotSeriesKey key)
+        {
+            if (_plotSeriesColors.TryGetValue(key, out var color))
+            {
+                return color;
+            }
+
+            var index = ComputeStableSeriesColorIndex(key);
+            color = PlotSeriesPalette[index];
+            _plotSeriesColors[key] = color;
+            return color;
+        }
+
+        private static int ComputeStableSeriesColorIndex(PlotSeriesKey key)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (var ch in key.Epc)
+                {
+                    hash ^= ch;
+                    hash *= 16777619;
+                }
+
+                hash ^= key.AntennaPort;
+                hash *= 16777619;
+                return (int)(hash % PlotSeriesPalette.Length);
+            }
         }
 
         private void ApplyLegendVisibility(ScottPlot.Plot plot)
@@ -1524,56 +2147,202 @@ namespace ImpinjR700
             }
         }
 
-        private static List<List<TagReadRecord>> SplitSamplesByGap(
+        /// <summary>
+        ///  仅按有效值切分采样，长时间未读取也保持连线。
+        /// </summary>
+        private static List<List<TagReadRecord>> SplitSamplesByValidity(
             IReadOnlyList<TagReadRecord> samples,
-            double gapThresholdSeconds,
             Func<TagReadRecord, bool> includePredicate)
         {
             var segments = new List<List<TagReadRecord>>();
             List<TagReadRecord>? current = null;
-            DateTime? previousTime = null;
 
             foreach (var sample in samples)
             {
                 if (!includePredicate(sample))
                 {
+                    current = null;
                     continue;
                 }
 
-                var needNewSegment = current == null ||
-                                     (previousTime.HasValue &&
-                                      (sample.LastSeen - previousTime.Value).TotalSeconds > gapThresholdSeconds);
-                if (needNewSegment)
+                if (current == null)
                 {
                     current = new List<TagReadRecord>();
                     segments.Add(current);
                 }
 
-                current!.Add(sample);
-                previousTime = sample.LastSeen;
+                current.Add(sample);
             }
 
             return segments;
         }
 
-        private static void ClampXAxisToZero(ScottPlot.Plot plot)
+        private static void ApplyForwardXAxisLimits(ScottPlot.Plot plot, double left, double right)
         {
             var limits = plot.Axes.GetLimits();
-            var right = limits.Right;
-            if (double.IsNaN(right) || double.IsInfinity(right) || right <= 0)
-            {
-                right = PlotDisplayWindowSeconds;
-            }
+            var safeLeft = double.IsNaN(left) || double.IsInfinity(left) ? 0 : Math.Max(0, left);
+            var safeRight = double.IsNaN(right) || double.IsInfinity(right)
+                ? PlotDisplayWindowSeconds
+                : Math.Max(safeLeft + 1, right);
 
-            if (limits.Left < 0 || limits.Right <= 0 || double.IsNaN(limits.Left) || double.IsInfinity(limits.Left))
+            if (double.IsNaN(limits.Left) || double.IsInfinity(limits.Left) ||
+                double.IsNaN(limits.Right) || double.IsInfinity(limits.Right) ||
+                Math.Abs(limits.Left - safeLeft) > 0.0001 ||
+                Math.Abs(limits.Right - safeRight) > 0.0001)
             {
-                plot.Axes.SetLimits(0, right, limits.Bottom, limits.Top);
+                plot.Axes.SetLimits(safeLeft, safeRight, limits.Bottom, limits.Top);
             }
         }
 
         private void PlotRenderTimer_Tick(object? sender, EventArgs e)
         {
             RenderPlot();
+        }
+
+        private void StatisticsRefreshTimer_Tick(object? sender, EventArgs e)
+        {
+            _statisticsRefreshTimer.Stop();
+            _statisticsRefreshPending = false;
+            _lastStatisticsRefreshTime = DateTime.UtcNow;
+            UpdateStatisticsCore();
+        }
+
+        /// <summary>
+        ///  新记录满足绘图区条件时，发起一次蜂鸣请求，由蜂鸣调度器统一处理节流与播放。
+        /// </summary>
+        private void TryBeepAlert(TagReadRecord record)
+        {
+            if (!IsRecordRenderableForPlot(record))
+            {
+                return;
+            }
+
+            RequestSoundAlert();
+        }
+
+        /// <summary>
+        ///  判断当前记录是否会进入绘图区。
+        /// </summary>
+        private bool IsRecordRenderableForPlot(TagReadRecord record)
+        {
+            if (checkPlotSelectionOnly.Checked &&
+                !IsEpcIncludedByFilter(record.Epc, _selectedPlotEpcs, GetCurrentEpcFilterMode()))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        ///  判断 EPC 在当前筛选条件下是否属于绘图区。
+        /// </summary>
+        private bool IsEpcRenderableForPlot(string epc)
+        {
+            if (!checkPlotSelectionOnly.Checked)
+            {
+                return true;
+            }
+
+            return IsEpcIncludedByFilter(epc, _selectedPlotEpcs, GetCurrentEpcFilterMode());
+        }
+
+        private void SoundAlertTimer_Tick(object? sender, EventArgs e)
+        {
+            _soundAlertTimer.Stop();
+            TryProcessSoundAlert();
+        }
+
+        /// <summary>
+        ///  对外接收蜂鸣请求，统一进入蜂鸣调度。
+        /// </summary>
+        private void RequestSoundAlert()
+        {
+            if (!_soundAlertEnabled)
+            {
+                return;
+            }
+
+            _soundAlertPending = true;
+            TryProcessSoundAlert();
+        }
+
+        /// <summary>
+        ///  按最小间隔调度蜂鸣；未到时间则挂到定时器，到了就立即播放。
+        /// </summary>
+        private void TryProcessSoundAlert()
+        {
+            if (!_soundAlertEnabled || !_soundAlertPending)
+            {
+                _soundAlertTimer.Stop();
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var elapsed = now - _lastSoundAlertTime;
+            if (elapsed < SoundAlertMinInterval)
+            {
+                var delay = SoundAlertMinInterval - elapsed;
+                _soundAlertTimer.Stop();
+                _soundAlertTimer.Interval = Math.Max(1, (int)delay.TotalMilliseconds);
+                _soundAlertTimer.Start();
+                return;
+            }
+
+            _soundAlertPending = false;
+            _lastSoundAlertTime = now;
+            PlaySoundAlertAsync();
+        }
+
+        /// <summary>
+        ///  异步播放一次蜂鸣，避免阻塞 UI。
+        /// </summary>
+        private void PlaySoundAlertAsync()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _soundAlertPlaying, 1) == 1)
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    Console.Beep(SoundAlertBeepFrequency, SoundAlertBeepDurationMs);
+                }
+                catch
+                {
+                    // 某些环境下可能不支持蜂鸣器调用，此处忽略异常，避免影响主流程。
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref _soundAlertPlaying, 0);
+                }
+            });
+        }
+
+        /// <summary>
+        ///  切换蜂鸣开关，并同步清理挂起状态。
+        /// </summary>
+        private void SetSoundAlertEnabled(bool enabled)
+        {
+            _soundAlertEnabled = enabled;
+            if (_soundAlertEnabled)
+            {
+                return;
+            }
+
+            ResetSoundAlertState();
+        }
+
+        /// <summary>
+        ///  重置蜂鸣调度状态。
+        /// </summary>
+        private void ResetSoundAlertState()
+        {
+            _soundAlertPending = false;
+            _lastSoundAlertTime = DateTime.MinValue;
+            _soundAlertTimer.Stop();
         }
 
         private static string FormatPlotLegend(PlotSeriesKey seriesKey)
@@ -1641,6 +2410,43 @@ namespace ImpinjR700
         }
 
         /// <summary>
+        ///  节流刷新统计区域，避免高频上报时频繁重算。
+        /// </summary>
+        private void RequestStatisticsRefresh()
+        {
+            var now = DateTime.UtcNow;
+            if (now - _lastStatisticsRefreshTime >= StatisticsRefreshInterval)
+            {
+                _statisticsRefreshTimer.Stop();
+                _statisticsRefreshPending = false;
+                _lastStatisticsRefreshTime = now;
+                UpdateStatisticsCore();
+                return;
+            }
+
+            if (_statisticsRefreshPending)
+            {
+                return;
+            }
+
+            var delay = StatisticsRefreshInterval - (now - _lastStatisticsRefreshTime);
+            _statisticsRefreshTimer.Interval = Math.Max(1, (int)delay.TotalMilliseconds);
+            _statisticsRefreshPending = true;
+            _statisticsRefreshTimer.Start();
+        }
+
+        /// <summary>
+        ///  强制刷新统计区域，用于清空等即时场景。
+        /// </summary>
+        private void ForceStatisticsRefresh()
+        {
+            _statisticsRefreshTimer.Stop();
+            _statisticsRefreshPending = false;
+            _lastStatisticsRefreshTime = DateTime.UtcNow;
+            UpdateStatisticsCore();
+        }
+
+        /// <summary>
         ///  启动自动重连任务。
         /// </summary>
         private void BeginReconnectLoop()
@@ -1651,55 +2457,58 @@ namespace ImpinjR700
                 return;
             }
 
+            if (Interlocked.Exchange(ref _reconnectLoopActive, 1) == 1)
+            {
+                AppendLog("自动重连任务已在运行，忽略重复启动。");
+                return;
+            }
+
             CancelReconnect();
             _reconnectCts = new CancellationTokenSource();
             var token = _reconnectCts.Token;
+            var readerAddress = _readerAddress;
 
             Task.Run(async () =>
             {
-                while (!token.IsCancellationRequested && checkAutoReconnect.Checked)
+                try
                 {
-                    try
+                    while (!token.IsCancellationRequested)
                     {
-                        AppendLog("正在尝试重新连接读写器...");
-                        var reader = CreateAndConnectReader(_readerAddress);
-                        if (token.IsCancellationRequested)
+                        try
                         {
-                            reader.Disconnect();
-                            reader.ConnectionLost -= Reader_ConnectionLost;
-                            reader.TagsReported -= Reader_TagsReported;
+                            AppendLog("正在尝试重新连接读写器...");
+                            var reader = CreateAndConnectReader(readerAddress);
+                            if (token.IsCancellationRequested)
+                            {
+                                SafeReleaseReader(reader);
+                                return;
+                            }
+
+                            RunOnUiThread(() => CompleteReconnect(reader));
                             return;
                         }
-
-                        BeginInvoke(new Action(() =>
+                        catch (OctaneSdkException ex)
                         {
-                            _reader = reader;
-                            UpdateStatus("已连接", Color.DarkGreen);
-                            buttonDisconnect.Enabled = true;
-                            buttonStart.Enabled = true;
-                            buttonStop.Enabled = false;
-                            UpdateAntennaConfigurationButtonState();
-                            AppendLog("重连成功。");
-                        }));
-                        return;
-                    }
-                    catch (OctaneSdkException ex)
-                    {
-                        AppendLog($"重连失败：{ex.Message}，将于 5 秒后重试。");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog($"重连失败：{ex.Message}，将于 5 秒后重试。");
-                    }
+                            AppendLog($"重连失败：{ex.Message}，将于 5 秒后重试。");
+                        }
+                        catch (Exception ex)
+                        {
+                            AppendLog($"重连失败：{ex.Message}，将于 5 秒后重试。");
+                        }
 
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(5), token);
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(5), token);
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            return;
+                        }
                     }
-                    catch (TaskCanceledException)
-                    {
-                        return;
-                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _reconnectLoopActive, 0);
                 }
             }, token);
         }
@@ -1759,15 +2568,16 @@ namespace ImpinjR700
             catch (OctaneSdkException ex)
             {
                 AppendLog($"获取读写器信息失败：{ex.Message}");
-                MessageBox.Show(this, $"获取读写器信息失败：{ex.Message}", "淇℃伅鎻愮ず", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(this, $"获取读写器信息失败：{ex.Message}", "信息提示", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         /// <summary>
-        ///  清空标签缓存并刷新统计。
+        ///  清空表格绑定的历史记录与标签索引，并刷新统计。
         /// </summary>
         private void ClearTagData(string logMessage)
         {
+            ResetPendingTagQueue();
             _tagIndex.Clear();
             _signalReadCountByEpc.Clear();
             lock (_cacheLock)
@@ -1775,32 +2585,73 @@ namespace ImpinjR700
                 _readHistoryBinding.Clear();
             }
             RefreshEpcSelectionList();
-            _totalReadCount = 0;
             ResetPlotData();
-            UpdateStatistics();
+            ForceStatisticsRefresh();
             UpdateExportButtons();
             AppendLog(logMessage);
+        }
+
+        private void ResetPendingTagQueue()
+        {
+            _tagProcessTimer.Stop();
+            System.Threading.Interlocked.Exchange(ref _tagProcessScheduled, 0);
+            while (_pendingTagQueue.TryDequeue(out _))
+            {
+            }
         }
 
         /// <summary>
         ///  更新统计信息显示。
         /// </summary>
-        private void UpdateStatistics()
+        private void UpdateStatisticsCore()
         {
             labelRecordCountValue.Text = _tagIndex.Count.ToString();
 
+            var filteredEpcs = GetStatisticsScopedEpcs();
             if (_statUniqueTagsItem != null)
             {
-                _statUniqueTagsItem.SubItems[1].Text = _tagIndex.Count.ToString();
-            }
-
-            if (_statTotalReadsItem != null)
-            {
-                _statTotalReadsItem.SubItems[1].Text = _totalReadCount.ToString();
+                _statUniqueTagsItem.SubItems[1].Text = filteredEpcs.Count.ToString();
             }
 
             var records = BuildRenderableRecords();
             UpdatePerSeriesRssiStatistics(records);
+        }
+
+        private List<string> GetStatisticsScopedEpcs()
+        {
+            var epcs = _tagIndex.Keys.OrderBy(static epc => epc, StringComparer.Ordinal).ToList();
+            if (!checkPlotSelectionOnly.Checked)
+            {
+                return epcs;
+            }
+
+            var filterMode = GetCurrentEpcFilterMode();
+            return epcs
+                .Where(epc => IsEpcIncludedByFilter(epc, _selectedPlotEpcs, filterMode))
+                .ToList();
+        }
+
+        private EpcFilterMode GetCurrentEpcFilterMode()
+        {
+            return _comboEpcFilterMode.SelectedIndex == (int)EpcFilterMode.Blacklist
+                ? EpcFilterMode.Blacklist
+                : EpcFilterMode.Whitelist;
+        }
+
+        private static bool IsEpcIncludedByFilter(
+            string epc,
+            IReadOnlyCollection<string> selectedEpcs,
+            EpcFilterMode filterMode)
+        {
+            if (selectedEpcs.Count == 0)
+            {
+                return true;
+            }
+
+            var isSelected = selectedEpcs.Contains(epc);
+            return filterMode == EpcFilterMode.Blacklist
+                ? !isSelected
+                : isSelected;
         }
 
         private void UpdatePerSeriesRssiStatistics(IReadOnlyList<TagReadRecord> records)
@@ -1825,7 +2676,7 @@ namespace ImpinjR700
 
                 foreach (var entry in sortedEntries)
                 {
-                    var seriesName = FormatPlotLegend(entry.Key);
+                    var seriesName = $"{entry.Key.Epc} / {FormatAntenna(entry.Key.AntennaPort)}";
                     var rssiValues = entry.Value
                         .Select(record => record.Rssi)
                         .Where(value => !double.IsNaN(value) && !double.IsInfinity(value))
@@ -1839,10 +2690,19 @@ namespace ImpinjR700
                     var peak = rssiValues.Max();
                     var mean = rssiValues.Average();
                     var variance = rssiValues.Select(value => (value - mean) * (value - mean)).Average();
+                    var current = entry.Value
+                        .OrderBy(record => record.LastSeen)
+                        .Last()
+                        .Rssi;
 
-                    listStatistics.Items.Add(new ListViewItem(new[] { $"{seriesName} RSSI 峰值 (dBm)", peak.ToString("F2") }));
-                    listStatistics.Items.Add(new ListViewItem(new[] { $"{seriesName} RSSI 均值 (dBm)", mean.ToString("F2") }));
-                    listStatistics.Items.Add(new ListViewItem(new[] { $"{seriesName} RSSI 方差", variance.ToString("F2") }));
+                    listStatistics.Items.Add(new ListViewItem(new[]
+                    {
+                        seriesName,
+                        current.ToString("F2"),
+                        variance.ToString("F2"),
+                        mean.ToString("F2"),
+                        peak.ToString("F2")
+                    }));
                 }
             }
             finally
@@ -1852,7 +2712,7 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  根据缓存状态更新导出按钮。
+        ///  根据表格绑定数据源状态更新导出按钮。
         /// </summary>
         private void UpdateExportButtons()
         {
@@ -1872,15 +2732,28 @@ namespace ImpinjR700
 
         private void UpdateLegendToggleLayout()
         {
-            if (_checkShowLegend.Parent == null)
+            if (_checkShowLegend.Parent == null || _checkSoundAlert.Parent == null)
             {
                 return;
             }
 
             var x = checkPlotSelectionOnly.Right + 12;
             var y = checkPlotSelectionOnly.Top;
-            var maxX = Math.Max(6, groupExport.ClientSize.Width - _checkShowLegend.Width - 6);
-            _checkShowLegend.Location = new Point(Math.Min(x, maxX), y);
+            var maxX = Math.Max(6, groupExport.ClientSize.Width - 6);
+
+            var legendX = Math.Min(x, Math.Max(6, maxX - _checkShowLegend.Width));
+            _checkShowLegend.Location = new Point(legendX, y);
+
+            var soundX = _checkShowLegend.Right + 12;
+            if (soundX + _checkSoundAlert.Width <= maxX)
+            {
+                _checkSoundAlert.Location = new Point(soundX, y);
+                return;
+            }
+
+            var secondRowX = Math.Min(x, Math.Max(6, maxX - _checkSoundAlert.Width));
+            var secondRowY = _checkShowLegend.Bottom + 6;
+            _checkSoundAlert.Location = new Point(secondRowX, secondRowY);
         }
 
         /// <summary>
@@ -1933,13 +2806,13 @@ namespace ImpinjR700
         }
 
         /// <summary>
-        ///  捕获当前标签数据快照。
+        ///  从表格绑定数据源捕获当前标签数据快照。
         /// </summary>
         private List<TagReadRecord> CaptureReadHistorySnapshot()
         {
             lock (_cacheLock)
             {
-                return _renderCache.ToList();
+                return _readHistoryBinding.ToList();
             }
         }
 
@@ -1958,7 +2831,7 @@ namespace ImpinjR700
             using var dialog = new SaveFileDialog
             {
                 Title = "导出 CSV",
-                Filter = "CSV 鏂囦欢 (*.csv)|*.csv",
+                Filter = "CSV 文件 (*.csv)|*.csv",
                 FileName = BuildExportFileName(records, "csv"),
                 OverwritePrompt = true
             };
@@ -2153,6 +3026,17 @@ namespace ImpinjR700
         /// </summary>
         private void AppendLog(string message)
         {
+            if (InvokeRequired)
+            {
+                RunOnUiThread(() => AppendLog(message));
+                return;
+            }
+
+            if (IsDisposed || !IsHandleCreated)
+            {
+                return;
+            }
+
             var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             if (textLog.TextLength == 0)
             {
@@ -2161,6 +3045,87 @@ namespace ImpinjR700
             else
             {
                 textLog.AppendText(Environment.NewLine + line);
+            }
+        }
+
+        /// <summary>
+        ///  在 UI 线程执行操作，避免重连线程直接访问控件导致界面卡死。
+        /// </summary>
+        private void RunOnUiThread(Action action)
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(action);
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+
+                return;
+            }
+
+            action();
+        }
+
+        /// <summary>
+        ///  完成自动重连后的状态恢复，统一与首次连接保持一致。
+        /// </summary>
+        private void CompleteReconnect(ImpinjReader reader)
+        {
+            if (IsDisposed)
+            {
+                SafeReleaseReader(reader);
+                return;
+            }
+
+            var previousReader = _reader;
+            if (previousReader != null && !ReferenceEquals(previousReader, reader))
+            {
+                SafeReleaseReader(previousReader);
+            }
+
+            _reader = reader;
+            _isReading = false;
+            InitializeReaderOnConnect(reader);
+            RefreshAntennaSelection(reader);
+            UpdateStatus("已连接", Color.DarkGreen);
+            buttonConnect.Enabled = false;
+            buttonDisconnect.Enabled = true;
+            buttonStart.Enabled = true;
+            buttonStop.Enabled = false;
+            UpdateAntennaConfigurationButtonState();
+            AppendLog("重连成功。");
+        }
+
+        /// <summary>
+        ///  安全释放读写器实例，避免异常断线后残留事件订阅和连接状态。
+        /// </summary>
+        private void SafeReleaseReader(ImpinjReader reader)
+        {
+            try
+            {
+                if (reader.IsConnected)
+                {
+                    reader.Disconnect();
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                reader.ConnectionLost -= Reader_ConnectionLost;
+                reader.TagsReported -= Reader_TagsReported;
             }
         }
 
@@ -2213,6 +3178,15 @@ namespace ImpinjR700
                 }
             }
         }
+
+        private readonly record struct PendingTagReportItem(
+            string Epc,
+            ushort AntennaPort,
+            double Rssi,
+            double Phase,
+            ushort ReportedCount,
+            DateTime FirstSeen,
+            DateTime LastSeen);
 
         private sealed class TagReadRecord
         {
