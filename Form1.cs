@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Media;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,6 +40,8 @@ namespace ImpinjR700
         private static readonly TimeSpan SoundAlertMinInterval = TimeSpan.FromMilliseconds(800);
         private const int SoundAlertBeepFrequency = 1400;
         private const int SoundAlertBeepDurationMs = 90;
+        private const int SoundAlertSampleRate = 16000;
+        private static readonly byte[] SoundAlertWaveData = CreateSoundAlertWaveData();
         private const string PlotFontName = "Microsoft YaHei";
         private static readonly ScottPlot.Color[] PlotSeriesPalette = ScottPlot.Color.FromHex(new[]
         {
@@ -484,6 +487,7 @@ namespace ImpinjR700
         {
             StopSignalTest(logStop: false);
             CancelReconnect();
+            ResetSoundAlertState();
 
             if (_reader != null)
             {
@@ -620,6 +624,7 @@ namespace ImpinjR700
 
             TryStopReader();
             ResetPendingTagQueue();
+            ResetSoundAlertState();
             _isReading = false;
 
             UpdateStatus("已连接", Color.DarkGreen);
@@ -2308,11 +2313,14 @@ namespace ImpinjR700
             {
                 try
                 {
-                    Console.Beep(SoundAlertBeepFrequency, SoundAlertBeepDurationMs);
+                    using var audioStream = new MemoryStream(SoundAlertWaveData, writable: false);
+                    using var player = new SoundPlayer(audioStream);
+                    player.PlaySync();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 某些环境下可能不支持蜂鸣器调用，此处忽略异常，避免影响主流程。
+                    // 播放失败时只记录日志，避免影响标签处理主流程。
+                    AppendLog($"蜂鸣提示播放失败：{ex.Message}");
                 }
                 finally
                 {
@@ -2343,6 +2351,45 @@ namespace ImpinjR700
             _soundAlertPending = false;
             _lastSoundAlertTime = DateTime.MinValue;
             _soundAlertTimer.Stop();
+        }
+
+        /// <summary>
+        ///  生成内置 WAV 提示音，避免依赖 Console.Beep 在不同系统环境下表现不一致。
+        /// </summary>
+        private static byte[] CreateSoundAlertWaveData()
+        {
+            var sampleCount = Math.Max(1, SoundAlertSampleRate * SoundAlertBeepDurationMs / 1000);
+            var dataLength = sampleCount * sizeof(short);
+            using var stream = new MemoryStream(44 + dataLength);
+            using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
+
+            writer.Write(Encoding.ASCII.GetBytes("RIFF"));
+            writer.Write(36 + dataLength);
+            writer.Write(Encoding.ASCII.GetBytes("WAVE"));
+            writer.Write(Encoding.ASCII.GetBytes("fmt "));
+            writer.Write(16);
+            writer.Write((short)1);
+            writer.Write((short)1);
+            writer.Write(SoundAlertSampleRate);
+            writer.Write(SoundAlertSampleRate * sizeof(short));
+            writer.Write((short)sizeof(short));
+            writer.Write((short)16);
+            writer.Write(Encoding.ASCII.GetBytes("data"));
+            writer.Write(dataLength);
+
+            for (int i = 0; i < sampleCount; i++)
+            {
+                // 末尾渐弱，减少短提示音的爆音感。
+                var progress = (double)i / sampleCount;
+                var fadeFactor = progress > 0.82 ? (1.0 - progress) / 0.18 : 1.0;
+                fadeFactor = Math.Clamp(fadeFactor, 0.0, 1.0);
+                var angle = 2 * Math.PI * SoundAlertBeepFrequency * i / SoundAlertSampleRate;
+                var sample = (short)(Math.Sin(angle) * short.MaxValue * 0.28 * fadeFactor);
+                writer.Write(sample);
+            }
+
+            writer.Flush();
+            return stream.ToArray();
         }
 
         private static string FormatPlotLegend(PlotSeriesKey seriesKey)

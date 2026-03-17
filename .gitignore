@@ -31,3 +31,5 @@ packages/
 *.bak
 *.swp
 
+# 发布产物
+publish/
