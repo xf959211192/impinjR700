@@ -38,6 +38,7 @@ namespace ImpinjR700
         private static readonly TimeSpan TagProcessInterval = TimeSpan.FromMilliseconds(20);
         private const int MaxTagProcessBatchSize = 800;
         private static readonly TimeSpan SoundAlertMinInterval = TimeSpan.FromMilliseconds(800);
+        private static readonly TimeSpan SoundAlertRecentActivityWindow = TimeSpan.FromMilliseconds(500);
         private const int SoundAlertBeepFrequency = 1400;
         private const int SoundAlertBeepDurationMs = 90;
         private const int SoundAlertSampleRate = 16000;
@@ -87,6 +88,7 @@ namespace ImpinjR700
         private bool _isSignalTestRunning;
         private DateTime _signalTestStartTime = DateTime.MinValue;
         private DateTime _lastSoundAlertTime = DateTime.MinValue;
+        private long _lastTagActivityUtcTicks;
         private int _soundAlertPlaying;
         private int _tagProcessScheduled;
         private int _reconnectLoopActive;
@@ -1331,6 +1333,7 @@ namespace ImpinjR700
             }
 
             _readHistoryBinding.ResetBindings();
+            MarkTagActivity();
 
             foreach (var record in recordsToCache)
             {
@@ -2284,6 +2287,13 @@ namespace ImpinjR700
             }
 
             var now = DateTime.UtcNow;
+            if (!HasRecentTagActivity(now))
+            {
+                _soundAlertPending = false;
+                _soundAlertTimer.Stop();
+                return;
+            }
+
             var elapsed = now - _lastSoundAlertTime;
             if (elapsed < SoundAlertMinInterval)
             {
@@ -2351,6 +2361,36 @@ namespace ImpinjR700
             _soundAlertPending = false;
             _lastSoundAlertTime = DateTime.MinValue;
             _soundAlertTimer.Stop();
+            System.Threading.Interlocked.Exchange(ref _lastTagActivityUtcTicks, 0);
+        }
+
+        /// <summary>
+        ///  记录最近一次有效标签活动时间，供蜂鸣前二次确认使用。
+        /// </summary>
+        private void MarkTagActivity()
+        {
+            System.Threading.Interlocked.Exchange(ref _lastTagActivityUtcTicks, DateTime.UtcNow.Ticks);
+        }
+
+        /// <summary>
+        ///  蜂鸣前确认最近一小段时间内仍有标签活动，避免标签消失后补响尾音。
+        /// </summary>
+        private static bool HasRecentTagActivity(DateTime now, long lastTagActivityUtcTicks)
+        {
+            if (lastTagActivityUtcTicks <= 0)
+            {
+                return false;
+            }
+
+            var lastTagActivity = new DateTime(lastTagActivityUtcTicks, DateTimeKind.Utc);
+            return now - lastTagActivity <= SoundAlertRecentActivityWindow;
+        }
+
+        private bool HasRecentTagActivity(DateTime now)
+        {
+            return HasRecentTagActivity(
+                now,
+                System.Threading.Interlocked.Read(ref _lastTagActivityUtcTicks));
         }
 
         /// <summary>
@@ -2706,7 +2746,8 @@ namespace ImpinjR700
             listStatistics.BeginUpdate();
             try
             {
-                while (listStatistics.Items.Count > 2)
+                // 统计面板只有第 1 行“唯一标签数”是固定项，其余都应在每次刷新前清空重建。
+                while (listStatistics.Items.Count > 1)
                 {
                     listStatistics.Items.RemoveAt(listStatistics.Items.Count - 1);
                 }
