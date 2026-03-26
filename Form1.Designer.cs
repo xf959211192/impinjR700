@@ -71,10 +71,13 @@ namespace ImpinjR700
             this.tableStats = new System.Windows.Forms.TableLayoutPanel();
             this.listStatistics = new System.Windows.Forms.ListView();
             this.columnStatName = new System.Windows.Forms.ColumnHeader();
+            this.columnStatReadCount = new System.Windows.Forms.ColumnHeader();
             this.columnStatCurrent = new System.Windows.Forms.ColumnHeader();
-            this.columnStatVariance = new System.Windows.Forms.ColumnHeader();
+            this.columnStatMin = new System.Windows.Forms.ColumnHeader();
             this.columnStatMean = new System.Windows.Forms.ColumnHeader();
-            this.columnStatPeak = new System.Windows.Forms.ColumnHeader();
+            this.columnStatStdDev = new System.Windows.Forms.ColumnHeader();
+            this.columnStatCoefficientOfVariation = new System.Windows.Forms.ColumnHeader();
+            this.columnStatMax = new System.Windows.Forms.ColumnHeader();
             this.groupEpcSelection = new System.Windows.Forms.GroupBox();
             this.checkedListEpcSelection = new System.Windows.Forms.CheckedListBox();
             this.tabChart = new System.Windows.Forms.TabPage();
@@ -522,10 +525,13 @@ namespace ImpinjR700
             // 
             this.listStatistics.Columns.AddRange(new System.Windows.Forms.ColumnHeader[] {
             this.columnStatName,
+            this.columnStatReadCount,
             this.columnStatCurrent,
-            this.columnStatVariance,
+            this.columnStatMax,
+            this.columnStatMin,
             this.columnStatMean,
-            this.columnStatPeak});
+            this.columnStatStdDev,
+            this.columnStatCoefficientOfVariation});
             this.listStatistics.Dock = System.Windows.Forms.DockStyle.Fill;
             this.listStatistics.FullRowSelect = true;
             this.listStatistics.GridLines = true;
@@ -564,28 +570,43 @@ namespace ImpinjR700
             // 
             // columnStatName
             // 
-            this.columnStatName.Text = "指标";
-            this.columnStatName.Width = 420;
+            this.columnStatName.Text = "统计对象";
+            this.columnStatName.Width = 320;
+            // 
+            // columnStatReadCount
+            // 
+            this.columnStatReadCount.Text = "读取次数";
+            this.columnStatReadCount.Width = 90;
             // 
             // columnStatCurrent
             // 
-            this.columnStatCurrent.Text = "当前值";
-            this.columnStatCurrent.Width = 140;
+            this.columnStatCurrent.Text = "当前 RSSI";
+            this.columnStatCurrent.Width = 100;
             // 
-            // columnStatVariance
+            // columnStatMax
             // 
-            this.columnStatVariance.Text = "RSSI 方差";
-            this.columnStatVariance.Width = 140;
+            this.columnStatMax.Text = "最大值";
+            this.columnStatMax.Width = 90;
+            // 
+            // columnStatMin
+            // 
+            this.columnStatMin.Text = "最小值";
+            this.columnStatMin.Width = 90;
             // 
             // columnStatMean
             // 
             this.columnStatMean.Text = "RSSI 均值";
-            this.columnStatMean.Width = 140;
+            this.columnStatMean.Width = 90;
             // 
-            // columnStatPeak
+            // columnStatStdDev
             // 
-            this.columnStatPeak.Text = "RSSI 峰值";
-            this.columnStatPeak.Width = 140;
+            this.columnStatStdDev.Text = "标准差";
+            this.columnStatStdDev.Width = 90;
+            // 
+            // columnStatCoefficientOfVariation
+            // 
+            this.columnStatCoefficientOfVariation.Text = "变异系数";
+            this.columnStatCoefficientOfVariation.Width = 100;
             // 
             // tabChart
             // 
@@ -707,10 +728,13 @@ namespace ImpinjR700
         private System.Windows.Forms.TableLayoutPanel tableStats;
         private System.Windows.Forms.ListView listStatistics;
         private System.Windows.Forms.ColumnHeader columnStatName;
+        private System.Windows.Forms.ColumnHeader columnStatReadCount;
         private System.Windows.Forms.ColumnHeader columnStatCurrent;
-        private System.Windows.Forms.ColumnHeader columnStatVariance;
+        private System.Windows.Forms.ColumnHeader columnStatMin;
         private System.Windows.Forms.ColumnHeader columnStatMean;
-        private System.Windows.Forms.ColumnHeader columnStatPeak;
+        private System.Windows.Forms.ColumnHeader columnStatStdDev;
+        private System.Windows.Forms.ColumnHeader columnStatCoefficientOfVariation;
+        private System.Windows.Forms.ColumnHeader columnStatMax;
         private System.Windows.Forms.GroupBox groupEpcSelection;
         private System.Windows.Forms.CheckedListBox checkedListEpcSelection;
         private System.Windows.Forms.TabPage tabChart;

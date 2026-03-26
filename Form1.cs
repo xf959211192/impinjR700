@@ -353,7 +353,17 @@ namespace ImpinjR700
         private void ConfigureStatisticsView()
         {
             listStatistics.Items.Clear();
-            _statUniqueTagsItem = new ListViewItem(new[] { "唯一标签数", "0", string.Empty, string.Empty, string.Empty });
+            _statUniqueTagsItem = new ListViewItem(new[]
+            {
+                "唯一标签数",
+                "0",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty
+            });
             listStatistics.Items.Add(_statUniqueTagsItem);
         }
 
@@ -1879,26 +1889,24 @@ namespace ImpinjR700
                 snapshot = _readHistoryBinding.ToList();
             }
 
-            var selectedEpcs = GetSelectedEpcFilters();
-            var hasFilter = checkPlotSelectionOnly.Checked;
-            var filterMode = GetCurrentEpcFilterMode();
-            var filteredBySelection = snapshot
-                .Where(record => !hasFilter || IsEpcIncludedByFilter(record.Epc, selectedEpcs, filterMode))
-                .ToList();
+            return BuildFilteredRecords(snapshot);
+        }
 
-            if (filteredBySelection.Count == 0)
+        private List<TagReadRecord> BuildFilteredRecords(IReadOnlyList<TagReadRecord> snapshot)
+        {
+            if (snapshot.Count == 0)
             {
                 return new List<TagReadRecord>();
             }
 
-            var filtered = new List<TagReadRecord>(filteredBySelection.Count);
-            foreach (var record in filteredBySelection)
-            {
-                filtered.Add(record);
-            }
+            var selectedEpcs = GetSelectedEpcFilters();
+            var hasFilter = checkPlotSelectionOnly.Checked;
+            var filterMode = GetCurrentEpcFilterMode();
 
-            filtered.Sort(static (a, b) => DateTime.Compare(a.LastSeen, b.LastSeen));
-            return filtered;
+            return snapshot
+                .Where(record => !hasFilter || IsEpcIncludedByFilter(record.Epc, selectedEpcs, filterMode))
+                .OrderBy(record => record.LastSeen)
+                .ToList();
         }
 
         private static DateTime GetPlotWindowStart(IReadOnlyList<TagReadRecord> records)
@@ -2693,29 +2701,9 @@ namespace ImpinjR700
         private void UpdateStatisticsCore()
         {
             labelRecordCountValue.Text = _tagIndex.Count.ToString();
-
-            var filteredEpcs = GetStatisticsScopedEpcs();
-            if (_statUniqueTagsItem != null)
-            {
-                _statUniqueTagsItem.SubItems[1].Text = filteredEpcs.Count.ToString();
-            }
-
             var records = BuildRenderableRecords();
-            UpdatePerSeriesRssiStatistics(records);
-        }
-
-        private List<string> GetStatisticsScopedEpcs()
-        {
-            var epcs = _tagIndex.Keys.OrderBy(static epc => epc, StringComparer.Ordinal).ToList();
-            if (!checkPlotSelectionOnly.Checked)
-            {
-                return epcs;
-            }
-
-            var filterMode = GetCurrentEpcFilterMode();
-            return epcs
-                .Where(epc => IsEpcIncludedByFilter(epc, _selectedPlotEpcs, filterMode))
-                .ToList();
+            var statisticsRows = BuildStatisticsRows(records);
+            UpdatePerSeriesRssiStatistics(statisticsRows);
         }
 
         private EpcFilterMode GetCurrentEpcFilterMode()
@@ -2741,56 +2729,94 @@ namespace ImpinjR700
                 : isSelected;
         }
 
-        private void UpdatePerSeriesRssiStatistics(IReadOnlyList<TagReadRecord> records)
+        private List<StatisticsRow> BuildStatisticsRows(IReadOnlyList<TagReadRecord> records)
+        {
+            var grouped = GroupRecordsBySeries(records);
+            var statisticsRows = new List<StatisticsRow>
+            {
+                StatisticsRow.CreateSummary(grouped
+                    .Select(entry => entry.Key.Epc)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count())
+            };
+
+            if (grouped.Count == 0)
+            {
+                return statisticsRows;
+            }
+
+            var sortedEntries = grouped
+                .OrderBy(entry => entry.Key.Epc, StringComparer.Ordinal)
+                .ThenBy(entry => entry.Key.AntennaPort)
+                .ToList();
+
+            foreach (var entry in sortedEntries)
+            {
+                var rssiValues = entry.Value
+                    .Select(record => record.Rssi)
+                    .Where(value => !double.IsNaN(value) && !double.IsInfinity(value))
+                    .ToList();
+
+                if (rssiValues.Count == 0)
+                {
+                    continue;
+                }
+
+                var current = entry.Value
+                    .OrderBy(record => record.LastSeen)
+                    .Last()
+                    .Rssi;
+                var minimum = rssiValues.Min();
+                var maximum = rssiValues.Max();
+                var mean = rssiValues.Average();
+                var variance = rssiValues
+                    .Select(value => (value - mean) * (value - mean))
+                    .Average();
+                var standardDeviation = Math.Sqrt(variance);
+                var coefficientOfVariation = Math.Abs(mean) < 0.0001
+                    ? double.NaN
+                    : standardDeviation / Math.Abs(mean);
+
+                statisticsRows.Add(new StatisticsRow(
+                    $"{entry.Key.Epc} / {FormatAntenna(entry.Key.AntennaPort)}",
+                    rssiValues.Count,
+                    current,
+                    minimum,
+                    mean,
+                    standardDeviation,
+                    coefficientOfVariation,
+                    maximum));
+            }
+
+            return statisticsRows;
+        }
+
+        private void UpdatePerSeriesRssiStatistics(IReadOnlyList<StatisticsRow> statisticsRows)
         {
             listStatistics.BeginUpdate();
             try
             {
-                // 统计面板只有第 1 行“唯一标签数”是固定项，其余都应在每次刷新前清空重建。
-                while (listStatistics.Items.Count > 1)
+                listStatistics.Items.Clear();
+                foreach (var row in statisticsRows)
                 {
-                    listStatistics.Items.RemoveAt(listStatistics.Items.Count - 1);
-                }
-
-                var grouped = GroupRecordsBySeries(records);
-                if (grouped.Count == 0)
-                {
-                    return;
-                }
-
-                var sortedEntries = grouped
-                    .OrderBy(entry => FormatPlotLegend(entry.Key), StringComparer.Ordinal)
-                    .ToList();
-
-                foreach (var entry in sortedEntries)
-                {
-                    var seriesName = $"{entry.Key.Epc} / {FormatAntenna(entry.Key.AntennaPort)}";
-                    var rssiValues = entry.Value
-                        .Select(record => record.Rssi)
-                        .Where(value => !double.IsNaN(value) && !double.IsInfinity(value))
-                        .ToList();
-
-                    if (rssiValues.Count == 0)
+                    var item = new ListViewItem(new[]
                     {
-                        continue;
+                        row.Name,
+                        row.ReadCountDisplay,
+                        row.CurrentDisplay,
+                        row.MaxDisplay,
+                        row.MinDisplay,
+                        row.MeanDisplay,
+                        row.StandardDeviationDisplay,
+                        row.CoefficientOfVariationDisplay
+                    });
+
+                    if (row.IsSummary)
+                    {
+                        _statUniqueTagsItem = item;
                     }
 
-                    var peak = rssiValues.Max();
-                    var mean = rssiValues.Average();
-                    var variance = rssiValues.Select(value => (value - mean) * (value - mean)).Average();
-                    var current = entry.Value
-                        .OrderBy(record => record.LastSeen)
-                        .Last()
-                        .Rssi;
-
-                    listStatistics.Items.Add(new ListViewItem(new[]
-                    {
-                        seriesName,
-                        current.ToString("F2"),
-                        variance.ToString("F2"),
-                        mean.ToString("F2"),
-                        peak.ToString("F2")
-                    }));
+                    listStatistics.Items.Add(item);
                 }
             }
             finally
@@ -2916,6 +2942,7 @@ namespace ImpinjR700
             }
 
             var records = CaptureReadHistorySnapshot();
+            var statisticsRows = BuildStatisticsRows(BuildFilteredRecords(records));
             using var dialog = new SaveFileDialog
             {
                 Title = "导出 CSV",
@@ -2932,7 +2959,7 @@ namespace ImpinjR700
             SetExportInProgress(true);
             try
             {
-                await Task.Run(() => WriteCsv(dialog.FileName, records));
+                await Task.Run(() => WriteCsv(dialog.FileName, records, statisticsRows));
                 AppendLog($"已导出 CSV：{dialog.FileName}");
                 MessageBox.Show(this, "CSV 导出完成。", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -2959,6 +2986,7 @@ namespace ImpinjR700
             }
 
             var records = CaptureReadHistorySnapshot();
+            var statisticsRows = BuildStatisticsRows(BuildFilteredRecords(records));
             using var dialog = new SaveFileDialog
             {
                 Title = "导出 Excel",
@@ -2975,7 +3003,7 @@ namespace ImpinjR700
             SetExportInProgress(true);
             try
             {
-                await Task.Run(() => WriteExcel(dialog.FileName, records));
+                await Task.Run(() => WriteExcel(dialog.FileName, records, statisticsRows));
                 AppendLog($"已导出 Excel：{dialog.FileName}");
                 MessageBox.Show(this, "Excel 导出完成。", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -2995,7 +3023,8 @@ namespace ImpinjR700
         /// </summary>
         private static void WriteCsv(
             string filePath,
-            IReadOnlyList<TagReadRecord> records)
+            IReadOnlyList<TagReadRecord> records,
+            IReadOnlyList<StatisticsRow> statisticsRows)
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
@@ -3014,6 +3043,21 @@ namespace ImpinjR700
                 builder.Append(record.Rssi.ToString("F1")).Append(',');
                 builder.Append(double.IsNaN(record.Phase) ? string.Empty : record.Phase.ToString("F1")).Append(',');
                 builder.AppendLine(EscapeCsvValue(FormatTimestamp(record.FirstSeen)));
+            }
+
+            builder.AppendLine();
+            builder.AppendLine("统计信息");
+            builder.AppendLine("统计对象,读取次数,当前 RSSI,最大值,最小值,RSSI 均值,标准差,变异系数");
+            foreach (var row in statisticsRows)
+            {
+                builder.Append(EscapeCsvValue(row.Name)).Append(',');
+                builder.Append(EscapeCsvValue(row.ReadCountDisplay)).Append(',');
+                builder.Append(EscapeCsvValue(row.CurrentDisplay)).Append(',');
+                builder.Append(EscapeCsvValue(row.MaxDisplay)).Append(',');
+                builder.Append(EscapeCsvValue(row.MinDisplay)).Append(',');
+                builder.Append(EscapeCsvValue(row.MeanDisplay)).Append(',');
+                builder.Append(EscapeCsvValue(row.StandardDeviationDisplay)).Append(',');
+                builder.AppendLine(EscapeCsvValue(row.CoefficientOfVariationDisplay));
             }
 
             File.WriteAllText(filePath, builder.ToString(), new UTF8Encoding(true));
@@ -3066,7 +3110,8 @@ namespace ImpinjR700
         ///  写入 Excel 文件。`r`n        /// </summary>
         private static void WriteExcel(
             string filePath,
-            IReadOnlyList<TagReadRecord> records)
+            IReadOnlyList<TagReadRecord> records,
+            IReadOnlyList<StatisticsRow> statisticsRows)
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
@@ -3097,6 +3142,29 @@ namespace ImpinjR700
             }
 
             sheet.Columns().AdjustToContents();
+            var statisticsSheet = workbook.Worksheets.Add("统计信息");
+            string[] statisticsHeaders = { "统计对象", "读取次数", "当前 RSSI", "最大值", "最小值", "RSSI 均值", "标准差", "变异系数" };
+            for (var col = 0; col < statisticsHeaders.Length; col++)
+            {
+                statisticsSheet.Cell(1, col + 1).Value = statisticsHeaders[col];
+                statisticsSheet.Cell(1, col + 1).Style.Font.SetBold();
+            }
+
+            for (var index = 0; index < statisticsRows.Count; index++)
+            {
+                var statisticsRow = statisticsRows[index];
+                var rowNumber = index + 2;
+                statisticsSheet.Cell(rowNumber, 1).Value = statisticsRow.Name;
+                statisticsSheet.Cell(rowNumber, 2).Value = statisticsRow.ReadCountDisplay;
+                statisticsSheet.Cell(rowNumber, 3).Value = statisticsRow.CurrentDisplay;
+                statisticsSheet.Cell(rowNumber, 4).Value = statisticsRow.MaxDisplay;
+                statisticsSheet.Cell(rowNumber, 5).Value = statisticsRow.MinDisplay;
+                statisticsSheet.Cell(rowNumber, 6).Value = statisticsRow.MeanDisplay;
+                statisticsSheet.Cell(rowNumber, 7).Value = statisticsRow.StandardDeviationDisplay;
+                statisticsSheet.Cell(rowNumber, 8).Value = statisticsRow.CoefficientOfVariationDisplay;
+            }
+
+            statisticsSheet.Columns().AdjustToContents();
             workbook.SaveAs(filePath);
         }
 
@@ -3303,6 +3371,50 @@ namespace ImpinjR700
             public string ReadCountDisplay => ReadCount.ToString();
             public string FirstSeenDisplay => FormatTimestamp(FirstSeen);
             public string LastSeenDisplay => FormatTimestamp(LastSeen);
+        }
+
+        private readonly record struct StatisticsRow(
+            string Name,
+            int ReadCount,
+            double Current,
+            double Min,
+            double Mean,
+            double StandardDeviation,
+            double CoefficientOfVariation,
+            double Max,
+            bool IsSummary = false)
+        {
+            public static StatisticsRow CreateSummary(int uniqueTagCount)
+            {
+                return new StatisticsRow(
+                    "唯一标签数",
+                    uniqueTagCount,
+                    double.NaN,
+                    double.NaN,
+                    double.NaN,
+                    double.NaN,
+                    double.NaN,
+                    double.NaN,
+                    true);
+            }
+
+            public string ReadCountDisplay => ReadCount.ToString();
+            public string CurrentDisplay => FormatNumeric(Current);
+            public string MinDisplay => FormatNumeric(Min);
+            public string MeanDisplay => FormatNumeric(Mean);
+            public string StandardDeviationDisplay => FormatNumeric(StandardDeviation);
+            public string CoefficientOfVariationDisplay =>
+                double.IsNaN(CoefficientOfVariation) || double.IsInfinity(CoefficientOfVariation)
+                    ? string.Empty
+                    : $"{CoefficientOfVariation * 100:F2}%";
+            public string MaxDisplay => FormatNumeric(Max);
+
+            private static string FormatNumeric(double value)
+            {
+                return double.IsNaN(value) || double.IsInfinity(value)
+                    ? string.Empty
+                    : value.ToString("F2");
+            }
         }
 
         /// <summary>
