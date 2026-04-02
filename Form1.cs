@@ -44,6 +44,16 @@ namespace ImpinjR700
         private const int SoundAlertSampleRate = 16000;
         private static readonly byte[] SoundAlertWaveData = CreateSoundAlertWaveData();
         private const string PlotFontName = "Microsoft YaHei";
+        private const float UiTitleFontSize = 11F;
+        private const float UiBodyFontSize = 9F;
+        private const int UiInputHeight = 30;
+        private const int UiButtonHeight = 32;
+        private const int UiGroupPadding = 12;
+        private const int UiGroupSpacing = 8;
+        private const int UiSectionSpacing = 12;
+        private const int UiHeaderGroupHeight = 260;
+        private const int UiActionButtonWidth = 128;
+        private const int UiNumericInputWidth = 72;
         private static readonly ScottPlot.Color[] PlotSeriesPalette = ScottPlot.Color.FromHex(new[]
         {
             "#1F77B4",
@@ -66,6 +76,7 @@ namespace ImpinjR700
         private readonly System.Windows.Forms.Timer _soundAlertTimer;
         private readonly System.Windows.Forms.Timer _tagProcessTimer;
         private readonly System.Windows.Forms.Timer _signalTestTimer;
+        private readonly System.Windows.Forms.Timer _timedReadTimer;
         private readonly Random _signalNoiseRandom = new();
         private readonly ConcurrentQueue<PendingTagReportItem> _pendingTagQueue = new();
         private bool _plotRenderPending;
@@ -92,12 +103,17 @@ namespace ImpinjR700
         private int _soundAlertPlaying;
         private int _tagProcessScheduled;
         private int _reconnectLoopActive;
+        private DateTime _timedReadEndTimeUtc = DateTime.MinValue;
+        private bool _isTimedReadActive;
         private bool _soundAlertEnabled = true;
         private readonly HashSet<string> _selectedPlotEpcs = new(StringComparer.Ordinal);
         private readonly Dictionary<PlotSeriesKey, ScottPlot.Color> _plotSeriesColors = new();
         private readonly Dictionary<string, ushort> _signalReadCountByEpc = new();
         private readonly CheckBox _checkShowLegend = new();
         private readonly CheckBox _checkSoundAlert = new();
+        private readonly Font _uiTitleFont = new(PlotFontName, UiTitleFontSize, FontStyle.Regular, GraphicsUnit.Point);
+        private readonly Font _uiBodyFont = new(PlotFontName, UiBodyFontSize, FontStyle.Regular, GraphicsUnit.Point);
+        private readonly Font _uiBodyBoldFont = new(PlotFontName, UiBodyFontSize, FontStyle.Bold, GraphicsUnit.Point);
         private readonly TableLayoutPanel _tableEpcFilter = new();
         private readonly FlowLayoutPanel _panelEpcFilterMode = new();
         private readonly Label _labelEpcFilterMode = new();
@@ -146,6 +162,11 @@ namespace ImpinjR700
                 Interval = 60
             };
             _signalTestTimer.Tick += SignalTestTimer_Tick;
+            _timedReadTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 200
+            };
+            _timedReadTimer.Tick += TimedReadTimer_Tick;
             InitializeUiState();
         }
 
@@ -245,9 +266,22 @@ namespace ImpinjR700
         {
             buttonDisconnect.Enabled = false;
             buttonStart.Enabled = false;
+            buttonTimedRead.Enabled = false;
             buttonStop.Enabled = false;
             buttonExportCsv.Enabled = false;
             buttonExportExcel.Enabled = false;
+            numericTimedReadDuration.Enabled = true;
+            numericTimedReadDuration.Value = 10;
+            groupControl.Text = "读取控制";
+            buttonTestSignal.Text = "模拟测试信号";
+            labelTimedReadDuration.Text = "读取时长（s）：";
+            checkPlotSelectionOnly.Text = "仅绘制选中标签";
+            buttonAntennaConfig.Text = "详细配置...";
+            labelAntennaSelection.Text = "选择天线端口：";
+            checkAutoReconnect.Text = "连接异常自动重试";
+            buttonStop.Text = "停止读取";
+            buttonStart.Text = "开始读取";
+            buttonTimedRead.Text = "定时读取";
 
             gridTags.AutoGenerateColumns = false;
             columnEpc.DataPropertyName = nameof(TagReadRecord.Epc);
@@ -282,7 +316,8 @@ namespace ImpinjR700
             buttonConnect.Click += async (_, _) => await ConnectAsync();
             buttonDisconnect.Click += (_, _) => Disconnect();
             buttonReaderInfo.Click += (_, _) => ShowReaderInfo();
-            buttonStart.Click += (_, _) => StartReading();
+            buttonStart.Click += (_, _) => StartReading(false);
+            buttonTimedRead.Click += (_, _) => StartReading(true);
             buttonStop.Click += (_, _) => StopReading();
             buttonTestSignal.Click += (_, _) => ToggleSignalTest();
             buttonAntennaConfig.Click += (_, _) => ShowAntennaConfigurationDialog();
@@ -297,6 +332,7 @@ namespace ImpinjR700
                 }
             };
             checkPlotSelectionOnly.CheckedChanged += (_, _) => OnPlotSelectionFilterChanged();
+            numericTimedReadDuration.ValueChanged += (_, _) => UpdateTimedReadDurationToolTip();
             if (_checkShowLegend.Parent == null)
             {
                 _checkShowLegend.AutoSize = true;
@@ -323,28 +359,199 @@ namespace ImpinjR700
                 checkPlotSelectionOnly.LocationChanged += (_, _) => UpdateLegendToggleLayout();
                 UpdateLegendToggleLayout();
             }
+            ApplyGlobalUiSpec();
             RefreshEpcSelectionList();
             RefreshSelectedPlotEpcsCache();
             FormClosing += (_, _) =>
             {
                 StopSignalTest(logStop: false);
+                CancelTimedRead();
                 CancelReconnect();
                 Disconnect();
                 _plotRenderTimer.Stop();
                 _statisticsRefreshTimer.Stop();
                 _soundAlertTimer.Stop();
                 _tagProcessTimer.Stop();
+                _timedReadTimer.Stop();
                 ResetPendingTagQueue();
             };
 
             checkedListAntennas.Enabled = true;
             checkedListAntennas.Items.Clear();
             checkedListAntennas.ItemCheck += checkedListAntennas_ItemCheck;
+            UpdateTimedReadDurationToolTip();
 
             PopulateOfflineAntennaSelection();
 
             UpdateExportButtons();
             UpdateAntennaConfigurationButtonState();
+        }
+
+        private void ApplyGlobalUiSpec()
+        {
+            Font = _uiBodyFont;
+            ApplyBodyFontRecursive(this);
+
+            foreach (var group in new[] { groupConnection, groupControl, groupExport })
+            {
+                group.Font = _uiTitleFont;
+                group.Margin = new Padding(UiSectionSpacing / 2);
+            }
+
+            tableHeader.Padding = new Padding(UiSectionSpacing / 2);
+            tableHeader.Height = UiHeaderGroupHeight + UiSectionSpacing;
+
+            labelStatusValue.Font = _uiBodyBoldFont;
+            labelRecordCountValue.Font = _uiBodyBoldFont;
+
+            textReaderIp.AutoSize = false;
+            textReaderIp.Height = UiInputHeight;
+
+            numericTimedReadDuration.AutoSize = false;
+            numericTimedReadDuration.Height = UiInputHeight;
+
+            var buttons = new[]
+            {
+                buttonConnect,
+                buttonDisconnect,
+                buttonReaderInfo,
+                buttonStart,
+                buttonTimedRead,
+                buttonStop,
+                buttonAntennaConfig,
+                buttonTestSignal,
+                buttonExportCsv,
+                buttonExportExcel,
+                buttonClear
+            };
+
+            foreach (var button in buttons)
+            {
+                button.Font = _uiBodyFont;
+                button.Height = UiButtonHeight;
+            }
+
+            LayoutHeaderGroups();
+            tableHeader.SizeChanged += (_, _) => LayoutHeaderGroups();
+            groupConnection.SizeChanged += (_, _) => LayoutConnectionGroup();
+            groupControl.SizeChanged += (_, _) => LayoutControlGroup();
+            groupExport.SizeChanged += (_, _) => LayoutExportGroup();
+        }
+
+        private void ApplyBodyFontRecursive(Control parent)
+        {
+            foreach (Control control in parent.Controls)
+            {
+                if (control is GroupBox groupBox)
+                {
+                    groupBox.Font = _uiTitleFont;
+                }
+                else
+                {
+                    control.Font = _uiBodyFont;
+                }
+
+                ApplyBodyFontRecursive(control);
+            }
+        }
+
+        private void LayoutHeaderGroups()
+        {
+            groupConnection.Height = UiHeaderGroupHeight;
+            groupControl.Height = UiHeaderGroupHeight;
+            groupExport.Height = UiHeaderGroupHeight;
+
+            LayoutConnectionGroup();
+            LayoutControlGroup();
+            LayoutExportGroup();
+        }
+
+        private void LayoutConnectionGroup()
+        {
+            var contentLeft = UiGroupPadding;
+            var contentRight = Math.Max(contentLeft, groupConnection.ClientSize.Width - UiGroupPadding);
+            var contentTop = GetGroupContentTop(groupConnection);
+            var labelWidth = TextRenderer.MeasureText(labelReaderIp.Text, _uiBodyFont).Width;
+
+            labelReaderIp.Location = new Point(contentLeft, contentTop + (UiInputHeight - labelReaderIp.Height) / 2);
+            textReaderIp.SetBounds(
+                contentLeft + labelWidth + UiGroupSpacing,
+                contentTop,
+                Math.Max(80, contentRight - (contentLeft + labelWidth + UiGroupSpacing)),
+                UiInputHeight);
+
+            var buttonTop = textReaderIp.Bottom + UiSectionSpacing;
+            var buttonWidth = Math.Min(UiActionButtonWidth, Math.Max(96, (contentRight - contentLeft - UiGroupSpacing) / 2));
+            buttonConnect.SetBounds(contentLeft, buttonTop, buttonWidth, UiButtonHeight);
+            buttonDisconnect.SetBounds(buttonConnect.Right + UiGroupSpacing, buttonTop, buttonWidth, UiButtonHeight);
+
+            var infoTop = buttonConnect.Bottom + UiGroupSpacing;
+            buttonReaderInfo.SetBounds(contentLeft, infoTop, buttonWidth, UiButtonHeight);
+
+            var statusX = buttonReaderInfo.Right + UiSectionSpacing;
+            labelStatusCaption.Location = new Point(statusX, infoTop + (UiButtonHeight - labelStatusCaption.Height) / 2);
+            labelStatusValue.Location = new Point(labelStatusCaption.Right + UiGroupSpacing, infoTop + (UiButtonHeight - labelStatusValue.Height) / 2);
+        }
+
+        private void LayoutControlGroup()
+        {
+            var contentLeft = UiGroupPadding;
+            var contentRight = Math.Max(contentLeft, groupControl.ClientSize.Width - UiGroupPadding);
+            var contentTop = GetGroupContentTop(groupControl);
+            var actionX = Math.Max(contentLeft, contentRight - UiActionButtonWidth);
+            var leftColumnRight = Math.Max(contentLeft + 120, actionX - UiSectionSpacing);
+
+            labelTimedReadDuration.Location = new Point(contentLeft, contentTop + (UiInputHeight - labelTimedReadDuration.Height) / 2);
+            numericTimedReadDuration.SetBounds(
+                Math.Max(labelTimedReadDuration.Right + UiGroupSpacing, leftColumnRight - UiNumericInputWidth),
+                contentTop,
+                UiNumericInputWidth,
+                UiInputHeight);
+
+            buttonStart.SetBounds(actionX, contentTop, UiActionButtonWidth, UiButtonHeight);
+            buttonTimedRead.SetBounds(actionX, buttonStart.Bottom + UiGroupSpacing, UiActionButtonWidth, UiButtonHeight);
+            buttonStop.SetBounds(actionX, buttonTimedRead.Bottom + UiGroupSpacing, UiActionButtonWidth, UiButtonHeight);
+            buttonAntennaConfig.SetBounds(actionX, buttonStop.Bottom + UiGroupSpacing, UiActionButtonWidth, UiButtonHeight);
+            buttonTestSignal.SetBounds(actionX, buttonAntennaConfig.Bottom + UiGroupSpacing, UiActionButtonWidth, UiButtonHeight);
+
+            var antennaLabelTop = numericTimedReadDuration.Bottom + UiSectionSpacing;
+            labelAntennaSelection.Location = new Point(contentLeft, antennaLabelTop);
+
+            var antennaListTop = labelAntennaSelection.Bottom + UiGroupSpacing;
+            var autoReconnectTop = Math.Max(antennaListTop + 84 + UiGroupSpacing, groupControl.ClientSize.Height - UiGroupPadding - checkAutoReconnect.Height);
+            checkedListAntennas.SetBounds(
+                contentLeft,
+                antennaListTop,
+                Math.Max(120, leftColumnRight - contentLeft),
+                Math.Max(84, autoReconnectTop - antennaListTop - UiGroupSpacing));
+
+            checkAutoReconnect.Location = new Point(contentLeft, checkedListAntennas.Bottom + UiGroupSpacing);
+        }
+
+        private void LayoutExportGroup()
+        {
+            var contentLeft = UiGroupPadding;
+            var contentRight = Math.Max(contentLeft, groupExport.ClientSize.Width - UiGroupPadding);
+            var contentWidth = contentRight - contentLeft;
+            var contentTop = GetGroupContentTop(groupExport);
+            var metricRowHeight = UiInputHeight;
+
+            labelRecordCountCaption.Location = new Point(contentLeft, contentTop + (metricRowHeight - labelRecordCountCaption.Height) / 2);
+            labelRecordCountValue.Location = new Point(labelRecordCountCaption.Right + UiGroupSpacing, contentTop + (metricRowHeight - labelRecordCountValue.Height) / 2);
+
+            var buttonTop = contentTop + metricRowHeight + UiSectionSpacing;
+            var buttonWidth = Math.Max(88, (contentWidth - (UiGroupSpacing * 2)) / 3);
+            buttonExportCsv.SetBounds(contentLeft, buttonTop, buttonWidth, UiButtonHeight);
+            buttonExportExcel.SetBounds(buttonExportCsv.Right + UiGroupSpacing, buttonTop, buttonWidth, UiButtonHeight);
+            buttonClear.SetBounds(buttonExportExcel.Right + UiGroupSpacing, buttonTop, buttonWidth, UiButtonHeight);
+
+            checkPlotSelectionOnly.Location = new Point(contentLeft, buttonExportCsv.Bottom + UiGroupSpacing);
+            UpdateLegendToggleLayout();
+        }
+
+        private static int GetGroupContentTop(GroupBox group)
+        {
+            return Math.Max(UiGroupPadding, group.Font.Height + UiGroupPadding);
         }
 
         /// <summary>
@@ -357,6 +564,7 @@ namespace ImpinjR700
             {
                 "唯一标签数",
                 "0",
+                string.Empty,
                 string.Empty,
                 string.Empty,
                 string.Empty,
@@ -462,6 +670,7 @@ namespace ImpinjR700
                 UpdateStatus("已连接", Color.DarkGreen);
                 buttonDisconnect.Enabled = true;
                 buttonStart.Enabled = true;
+                buttonTimedRead.Enabled = true;
                 buttonStop.Enabled = false;
                 UpdateAntennaConfigurationButtonState();
                 AppendLog($"成功连接至读写器 {address}。");
@@ -498,6 +707,7 @@ namespace ImpinjR700
         private void Disconnect()
         {
             StopSignalTest(logStop: false);
+            CancelTimedRead();
             CancelReconnect();
             ResetSoundAlertState();
 
@@ -532,10 +742,12 @@ namespace ImpinjR700
 
             _readerAddress = null;
             _isReading = false;
+            numericTimedReadDuration.Enabled = true;
             UpdateStatus("未连接", Color.DarkRed);
             buttonConnect.Enabled = true;
             buttonDisconnect.Enabled = false;
             buttonStart.Enabled = false;
+            buttonTimedRead.Enabled = false;
             buttonStop.Enabled = false;
             UpdateAntennaConfigurationButtonState();
             AppendLog("已断开与读写器的连接。");
@@ -544,7 +756,7 @@ namespace ImpinjR700
         /// <summary>
         ///  开始标签读取流程。
         /// </summary>
-        private void StartReading()
+        private void StartReading(bool timedRead)
         {
             if (_reader == null || !_reader.IsConnected)
             {
@@ -561,6 +773,7 @@ namespace ImpinjR700
             try
             {
                 CancelReconnect();
+                CancelTimedRead();
 
                 var selectedPorts = checkedListAntennas.CheckedItems
                     .OfType<AntennaListItem>()
@@ -602,14 +815,30 @@ namespace ImpinjR700
 
                 _reader.Start();
                 _isReading = true;
+                _isTimedReadActive = timedRead;
+                if (_isTimedReadActive)
+                {
+                    StartTimedRead();
+                }
+                else
+                {
+                    CancelTimedRead();
+                }
                 UpdateStatus("读取中", Color.RoyalBlue);
                 buttonStart.Enabled = false;
+                buttonTimedRead.Enabled = false;
                 buttonStop.Enabled = true;
+                numericTimedReadDuration.Enabled = !_isTimedReadActive;
                 UpdateAntennaConfigurationButtonState();
-                AppendLog("标签读取已启动。");
+                AppendLog(_isTimedReadActive
+                    ? $"定时读取已启动，计划读取 {GetTimedReadDurationSeconds()} 秒。"
+                    : "标签读取已启动。");
             }
             catch (OctaneSdkException ex)
             {
+                CancelTimedRead();
+                _isTimedReadActive = false;
+                numericTimedReadDuration.Enabled = true;
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 EnableAllAntennaPorts();
@@ -617,6 +846,9 @@ namespace ImpinjR700
             }
             catch (Exception ex)
             {
+                CancelTimedRead();
+                _isTimedReadActive = false;
+                numericTimedReadDuration.Enabled = true;
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 EnableAllAntennaPorts();
@@ -627,23 +859,79 @@ namespace ImpinjR700
         /// <summary>
         ///  停止标签读取流程。
         /// </summary>
-        private void StopReading()
+        private void StopReading(bool autoStopped = false)
         {
             if (_reader == null || !_isReading)
             {
+                CancelTimedRead();
                 return;
             }
 
             TryStopReader();
             ResetPendingTagQueue();
             ResetSoundAlertState();
+            CancelTimedRead();
             _isReading = false;
 
             UpdateStatus("已连接", Color.DarkGreen);
             buttonStart.Enabled = true;
+            buttonTimedRead.Enabled = true;
             buttonStop.Enabled = false;
+            numericTimedReadDuration.Enabled = true;
             UpdateAntennaConfigurationButtonState();
-            AppendLog("标签读取已停止。");
+            AppendLog(autoStopped ? "已到达设定读取时长，系统已自动暂停读取。" : "标签读取已停止。");
+        }
+
+        private int GetTimedReadDurationSeconds()
+        {
+            return decimal.ToInt32(numericTimedReadDuration.Value);
+        }
+
+        private void StartTimedRead()
+        {
+            var durationSeconds = GetTimedReadDurationSeconds();
+            _timedReadEndTimeUtc = DateTime.UtcNow.AddSeconds(durationSeconds);
+            _timedReadTimer.Stop();
+            _timedReadTimer.Start();
+            UpdateTimedReadDurationToolTip();
+        }
+
+        private void CancelTimedRead()
+        {
+            _timedReadTimer.Stop();
+            _timedReadEndTimeUtc = DateTime.MinValue;
+            _isTimedReadActive = false;
+            UpdateTimedReadDurationToolTip();
+        }
+
+        private void TimedReadTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!_isReading || _timedReadEndTimeUtc == DateTime.MinValue)
+            {
+                CancelTimedRead();
+                return;
+            }
+
+            var remaining = _timedReadEndTimeUtc - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                _timedReadTimer.Stop();
+                StopReading(autoStopped: true);
+                return;
+            }
+
+            UpdateTimedReadDurationToolTip(remaining);
+        }
+
+        private void UpdateTimedReadDurationToolTip(TimeSpan? remaining = null)
+        {
+            if (_isReading && remaining.HasValue)
+            {
+                numericTimedReadDuration.AccessibleDescription = $"本轮读取剩余 {Math.Ceiling(remaining.Value.TotalSeconds):F0} 秒";
+                return;
+            }
+
+            numericTimedReadDuration.AccessibleDescription = $"当前读取时长设置为 {GetTimedReadDurationSeconds()} 秒";
         }
 
         /// <summary>
@@ -2487,12 +2775,15 @@ namespace ImpinjR700
 
             BeginInvoke(new Action(() =>
             {
+                CancelTimedRead();
                 AppendLog("读写器连接已丢失。");
                 UpdateStatus("未连接", Color.DarkRed);
                 buttonStart.Enabled = false;
+                buttonTimedRead.Enabled = false;
                 buttonStop.Enabled = false;
                 buttonDisconnect.Enabled = false;
                 buttonConnect.Enabled = true;
+                numericTimedReadDuration.Enabled = true;
                 _isReading = false;
                 UpdateAntennaConfigurationButtonState();
 
@@ -2776,10 +3067,17 @@ namespace ImpinjR700
                 var coefficientOfVariation = Math.Abs(mean) < 0.0001
                     ? double.NaN
                     : standardDeviation / Math.Abs(mean);
+                var firstSeen = entry.Value.Min(record => record.FirstSeen);
+                var lastSeen = entry.Value.Max(record => record.LastSeen);
+                var activeDurationSeconds = (lastSeen - firstSeen).TotalSeconds;
+                var readRate = activeDurationSeconds <= 0
+                    ? rssiValues.Count
+                    : rssiValues.Count / activeDurationSeconds;
 
                 statisticsRows.Add(new StatisticsRow(
                     $"{entry.Key.Epc} / {FormatAntenna(entry.Key.AntennaPort)}",
                     rssiValues.Count,
+                    readRate,
                     current,
                     minimum,
                     mean,
@@ -2803,6 +3101,7 @@ namespace ImpinjR700
                     {
                         row.Name,
                         row.ReadCountDisplay,
+                        row.ReadRateDisplay,
                         row.CurrentDisplay,
                         row.MaxDisplay,
                         row.MinDisplay,
@@ -2851,22 +3150,22 @@ namespace ImpinjR700
                 return;
             }
 
-            var x = checkPlotSelectionOnly.Right + 12;
+            var x = checkPlotSelectionOnly.Right + UiGroupSpacing;
             var y = checkPlotSelectionOnly.Top;
-            var maxX = Math.Max(6, groupExport.ClientSize.Width - 6);
+            var maxX = Math.Max(UiGroupPadding, groupExport.ClientSize.Width - UiGroupPadding);
 
-            var legendX = Math.Min(x, Math.Max(6, maxX - _checkShowLegend.Width));
+            var legendX = Math.Min(x, Math.Max(UiGroupPadding, maxX - _checkShowLegend.Width));
             _checkShowLegend.Location = new Point(legendX, y);
 
-            var soundX = _checkShowLegend.Right + 12;
+            var soundX = _checkShowLegend.Right + UiGroupSpacing;
             if (soundX + _checkSoundAlert.Width <= maxX)
             {
                 _checkSoundAlert.Location = new Point(soundX, y);
                 return;
             }
 
-            var secondRowX = Math.Min(x, Math.Max(6, maxX - _checkSoundAlert.Width));
-            var secondRowY = _checkShowLegend.Bottom + 6;
+            var secondRowX = Math.Min(x, Math.Max(UiGroupPadding, maxX - _checkSoundAlert.Width));
+            var secondRowY = _checkShowLegend.Bottom + UiGroupSpacing;
             _checkSoundAlert.Location = new Point(secondRowX, secondRowY);
         }
 
@@ -3047,11 +3346,12 @@ namespace ImpinjR700
 
             builder.AppendLine();
             builder.AppendLine("统计信息");
-            builder.AppendLine("统计对象,读取次数,当前 RSSI,最大值,最小值,RSSI 均值,标准差,变异系数");
+            builder.AppendLine("统计对象,读取次数,读取速率(次/秒),当前 RSSI,最大值,最小值,RSSI 均值,标准差,变异系数");
             foreach (var row in statisticsRows)
             {
                 builder.Append(EscapeCsvValue(row.Name)).Append(',');
                 builder.Append(EscapeCsvValue(row.ReadCountDisplay)).Append(',');
+                builder.Append(EscapeCsvValue(row.ReadRateDisplay)).Append(',');
                 builder.Append(EscapeCsvValue(row.CurrentDisplay)).Append(',');
                 builder.Append(EscapeCsvValue(row.MaxDisplay)).Append(',');
                 builder.Append(EscapeCsvValue(row.MinDisplay)).Append(',');
@@ -3143,7 +3443,7 @@ namespace ImpinjR700
 
             sheet.Columns().AdjustToContents();
             var statisticsSheet = workbook.Worksheets.Add("统计信息");
-            string[] statisticsHeaders = { "统计对象", "读取次数", "当前 RSSI", "最大值", "最小值", "RSSI 均值", "标准差", "变异系数" };
+            string[] statisticsHeaders = { "统计对象", "读取次数", "读取速率(次/秒)", "当前 RSSI", "最大值", "最小值", "RSSI 均值", "标准差", "变异系数" };
             for (var col = 0; col < statisticsHeaders.Length; col++)
             {
                 statisticsSheet.Cell(1, col + 1).Value = statisticsHeaders[col];
@@ -3156,12 +3456,13 @@ namespace ImpinjR700
                 var rowNumber = index + 2;
                 statisticsSheet.Cell(rowNumber, 1).Value = statisticsRow.Name;
                 statisticsSheet.Cell(rowNumber, 2).Value = statisticsRow.ReadCountDisplay;
-                statisticsSheet.Cell(rowNumber, 3).Value = statisticsRow.CurrentDisplay;
-                statisticsSheet.Cell(rowNumber, 4).Value = statisticsRow.MaxDisplay;
-                statisticsSheet.Cell(rowNumber, 5).Value = statisticsRow.MinDisplay;
-                statisticsSheet.Cell(rowNumber, 6).Value = statisticsRow.MeanDisplay;
-                statisticsSheet.Cell(rowNumber, 7).Value = statisticsRow.StandardDeviationDisplay;
-                statisticsSheet.Cell(rowNumber, 8).Value = statisticsRow.CoefficientOfVariationDisplay;
+                statisticsSheet.Cell(rowNumber, 3).Value = statisticsRow.ReadRateDisplay;
+                statisticsSheet.Cell(rowNumber, 4).Value = statisticsRow.CurrentDisplay;
+                statisticsSheet.Cell(rowNumber, 5).Value = statisticsRow.MaxDisplay;
+                statisticsSheet.Cell(rowNumber, 6).Value = statisticsRow.MinDisplay;
+                statisticsSheet.Cell(rowNumber, 7).Value = statisticsRow.MeanDisplay;
+                statisticsSheet.Cell(rowNumber, 8).Value = statisticsRow.StandardDeviationDisplay;
+                statisticsSheet.Cell(rowNumber, 9).Value = statisticsRow.CoefficientOfVariationDisplay;
             }
 
             statisticsSheet.Columns().AdjustToContents();
@@ -3258,7 +3559,9 @@ namespace ImpinjR700
             buttonConnect.Enabled = false;
             buttonDisconnect.Enabled = true;
             buttonStart.Enabled = true;
+            buttonTimedRead.Enabled = true;
             buttonStop.Enabled = false;
+            numericTimedReadDuration.Enabled = true;
             UpdateAntennaConfigurationButtonState();
             AppendLog("重连成功。");
         }
@@ -3376,6 +3679,7 @@ namespace ImpinjR700
         private readonly record struct StatisticsRow(
             string Name,
             int ReadCount,
+            double ReadRate,
             double Current,
             double Min,
             double Mean,
@@ -3395,10 +3699,12 @@ namespace ImpinjR700
                     double.NaN,
                     double.NaN,
                     double.NaN,
+                    double.NaN,
                     true);
             }
 
             public string ReadCountDisplay => ReadCount.ToString();
+            public string ReadRateDisplay => FormatNumeric(ReadRate);
             public string CurrentDisplay => FormatNumeric(Current);
             public string MinDisplay => FormatNumeric(Min);
             public string MeanDisplay => FormatNumeric(Mean);

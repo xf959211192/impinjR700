@@ -43,6 +43,9 @@ namespace ImpinjR700
             this.labelReaderIp = new System.Windows.Forms.Label();
             this.groupControl = new System.Windows.Forms.GroupBox();
             this.buttonTestSignal = new System.Windows.Forms.Button();
+            this.buttonTimedRead = new System.Windows.Forms.Button();
+            this.labelTimedReadDuration = new System.Windows.Forms.Label();
+            this.numericTimedReadDuration = new System.Windows.Forms.NumericUpDown();
             this.checkPlotSelectionOnly = new System.Windows.Forms.CheckBox();
             this.buttonAntennaConfig = new System.Windows.Forms.Button();
             this.checkedListAntennas = new System.Windows.Forms.CheckedListBox();
@@ -72,6 +75,7 @@ namespace ImpinjR700
             this.listStatistics = new System.Windows.Forms.ListView();
             this.columnStatName = new System.Windows.Forms.ColumnHeader();
             this.columnStatReadCount = new System.Windows.Forms.ColumnHeader();
+            this.columnStatReadRate = new System.Windows.Forms.ColumnHeader();
             this.columnStatCurrent = new System.Windows.Forms.ColumnHeader();
             this.columnStatMin = new System.Windows.Forms.ColumnHeader();
             this.columnStatMean = new System.Windows.Forms.ColumnHeader();
@@ -92,6 +96,7 @@ namespace ImpinjR700
             this.tableHeader.SuspendLayout();
             this.groupConnection.SuspendLayout();
             this.groupControl.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.numericTimedReadDuration)).BeginInit();
             this.groupExport.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.gridTags)).BeginInit();
             this.tabBottom.SuspendLayout();
@@ -150,7 +155,7 @@ namespace ImpinjR700
             this.tableHeader.Name = "tableHeader";
             this.tableHeader.RowCount = 1;
             this.tableHeader.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100F));
-            this.tableHeader.Size = new System.Drawing.Size(1094, 160);
+            this.tableHeader.Size = new System.Drawing.Size(1094, 190);
             this.tableHeader.TabIndex = 0;
             // 
             // groupConnection
@@ -165,7 +170,7 @@ namespace ImpinjR700
             this.groupConnection.Dock = System.Windows.Forms.DockStyle.Fill;
             this.groupConnection.Location = new System.Drawing.Point(3, 3);
             this.groupConnection.Name = "groupConnection";
-            this.groupConnection.Size = new System.Drawing.Size(358, 138);
+            this.groupConnection.Size = new System.Drawing.Size(358, 190);
             this.groupConnection.TabIndex = 0;
             this.groupConnection.TabStop = false;
             this.groupConnection.Text = "设备管理";
@@ -237,6 +242,9 @@ namespace ImpinjR700
             // groupControl
             // 
             this.groupControl.Controls.Add(this.buttonTestSignal);
+            this.groupControl.Controls.Add(this.buttonTimedRead);
+            this.groupControl.Controls.Add(this.labelTimedReadDuration);
+            this.groupControl.Controls.Add(this.numericTimedReadDuration);
             this.groupControl.Controls.Add(this.buttonAntennaConfig);
             this.groupControl.Controls.Add(this.checkedListAntennas);
             this.groupControl.Controls.Add(this.labelAntennaSelection);
@@ -246,19 +254,59 @@ namespace ImpinjR700
             this.groupControl.Dock = System.Windows.Forms.DockStyle.Fill;
             this.groupControl.Location = new System.Drawing.Point(367, 3);
             this.groupControl.Name = "groupControl";
-            this.groupControl.Size = new System.Drawing.Size(358, 160);
+            this.groupControl.Size = new System.Drawing.Size(358, 190);
             this.groupControl.TabIndex = 1;
             this.groupControl.TabStop = false;
             this.groupControl.Text = "读取控制";
             // 
             // buttonTestSignal
             // 
-            this.buttonTestSignal.Location = new System.Drawing.Point(200, 12);
+            this.buttonTestSignal.Location = new System.Drawing.Point(206, 148);
             this.buttonTestSignal.Name = "buttonTestSignal";
-            this.buttonTestSignal.Size = new System.Drawing.Size(120, 30);
+            this.buttonTestSignal.Size = new System.Drawing.Size(128, 30);
             this.buttonTestSignal.TabIndex = 7;
             this.buttonTestSignal.Text = "模拟测试信号";
             this.buttonTestSignal.UseVisualStyleBackColor = true;
+            // 
+            // buttonTimedRead
+            // 
+            this.buttonTimedRead.Location = new System.Drawing.Point(206, 46);
+            this.buttonTimedRead.Name = "buttonTimedRead";
+            this.buttonTimedRead.Size = new System.Drawing.Size(128, 30);
+            this.buttonTimedRead.TabIndex = 10;
+            this.buttonTimedRead.Text = "定时读取";
+            this.buttonTimedRead.UseVisualStyleBackColor = true;
+            // 
+            // labelTimedReadDuration
+            // 
+            this.labelTimedReadDuration.AutoSize = true;
+            this.labelTimedReadDuration.Location = new System.Drawing.Point(24, 28);
+            this.labelTimedReadDuration.Name = "labelTimedReadDuration";
+            this.labelTimedReadDuration.Size = new System.Drawing.Size(92, 17);
+            this.labelTimedReadDuration.TabIndex = 8;
+            this.labelTimedReadDuration.Text = "璇诲彇鏃堕暱锛坰锛夛細";
+            // 
+            // numericTimedReadDuration
+            // 
+            this.numericTimedReadDuration.Location = new System.Drawing.Point(118, 24);
+            this.numericTimedReadDuration.Maximum = new decimal(new int[] {
+            86400,
+            0,
+            0,
+            0});
+            this.numericTimedReadDuration.Minimum = new decimal(new int[] {
+            1,
+            0,
+            0,
+            0});
+            this.numericTimedReadDuration.Name = "numericTimedReadDuration";
+            this.numericTimedReadDuration.Size = new System.Drawing.Size(58, 23);
+            this.numericTimedReadDuration.TabIndex = 9;
+            this.numericTimedReadDuration.Value = new decimal(new int[] {
+            10,
+            0,
+            0,
+            0});
             // 
             // checkPlotSelectionOnly
             // 
@@ -272,9 +320,9 @@ namespace ImpinjR700
             // 
             // buttonAntennaConfig
             // 
-            this.buttonAntennaConfig.Location = new System.Drawing.Point(200, 48);
+            this.buttonAntennaConfig.Location = new System.Drawing.Point(206, 114);
             this.buttonAntennaConfig.Name = "buttonAntennaConfig";
-            this.buttonAntennaConfig.Size = new System.Drawing.Size(120, 30);
+            this.buttonAntennaConfig.Size = new System.Drawing.Size(128, 30);
             this.buttonAntennaConfig.TabIndex = 2;
             this.buttonAntennaConfig.Text = "详细配置...";
             this.buttonAntennaConfig.UseVisualStyleBackColor = true;
@@ -284,15 +332,15 @@ namespace ImpinjR700
             this.checkedListAntennas.CheckOnClick = true;
             this.checkedListAntennas.FormattingEnabled = true;
             this.checkedListAntennas.IntegralHeight = false;
-            this.checkedListAntennas.Location = new System.Drawing.Point(26, 63);
+            this.checkedListAntennas.Location = new System.Drawing.Point(24, 78);
             this.checkedListAntennas.Name = "checkedListAntennas";
-            this.checkedListAntennas.Size = new System.Drawing.Size(150, 96);
+            this.checkedListAntennas.Size = new System.Drawing.Size(158, 88);
             this.checkedListAntennas.TabIndex = 1;
             // 
             // labelAntennaSelection
             // 
             this.labelAntennaSelection.AutoSize = true;
-            this.labelAntennaSelection.Location = new System.Drawing.Point(24, 32);
+            this.labelAntennaSelection.Location = new System.Drawing.Point(24, 56);
             this.labelAntennaSelection.Name = "labelAntennaSelection";
             this.labelAntennaSelection.Size = new System.Drawing.Size(104, 17);
             this.labelAntennaSelection.TabIndex = 0;
@@ -301,7 +349,7 @@ namespace ImpinjR700
             // checkAutoReconnect
             // 
             this.checkAutoReconnect.AutoSize = true;
-            this.checkAutoReconnect.Location = new System.Drawing.Point(200, 138);
+            this.checkAutoReconnect.Location = new System.Drawing.Point(24, 168);
             this.checkAutoReconnect.Name = "checkAutoReconnect";
             this.checkAutoReconnect.Size = new System.Drawing.Size(138, 21);
             this.checkAutoReconnect.TabIndex = 5;
@@ -310,18 +358,18 @@ namespace ImpinjR700
             // 
             // buttonStop
             // 
-            this.buttonStop.Location = new System.Drawing.Point(200, 118);
+            this.buttonStop.Location = new System.Drawing.Point(206, 80);
             this.buttonStop.Name = "buttonStop";
-            this.buttonStop.Size = new System.Drawing.Size(120, 30);
+            this.buttonStop.Size = new System.Drawing.Size(128, 30);
             this.buttonStop.TabIndex = 4;
             this.buttonStop.Text = "停止读取";
             this.buttonStop.UseVisualStyleBackColor = true;
             // 
             // buttonStart
             // 
-            this.buttonStart.Location = new System.Drawing.Point(200, 84);
+            this.buttonStart.Location = new System.Drawing.Point(206, 12);
             this.buttonStart.Name = "buttonStart";
-            this.buttonStart.Size = new System.Drawing.Size(120, 30);
+            this.buttonStart.Size = new System.Drawing.Size(128, 30);
             this.buttonStart.TabIndex = 3;
             this.buttonStart.Text = "开始读取";
             this.buttonStart.UseVisualStyleBackColor = true;
@@ -337,14 +385,14 @@ namespace ImpinjR700
             this.groupExport.Dock = System.Windows.Forms.DockStyle.Fill;
             this.groupExport.Location = new System.Drawing.Point(731, 3);
             this.groupExport.Name = "groupExport";
-            this.groupExport.Size = new System.Drawing.Size(360, 138);
+            this.groupExport.Size = new System.Drawing.Size(360, 190);
             this.groupExport.TabIndex = 2;
             this.groupExport.TabStop = false;
             this.groupExport.Text = "数据导出与统计";
             // 
             // buttonClear
             // 
-            this.buttonClear.Location = new System.Drawing.Point(242, 62);
+            this.buttonClear.Location = new System.Drawing.Point(242, 70);
             this.buttonClear.Name = "buttonClear";
             this.buttonClear.Size = new System.Drawing.Size(100, 30);
             this.buttonClear.TabIndex = 4;
@@ -353,7 +401,7 @@ namespace ImpinjR700
             // 
             // buttonExportExcel
             // 
-            this.buttonExportExcel.Location = new System.Drawing.Point(132, 62);
+            this.buttonExportExcel.Location = new System.Drawing.Point(132, 70);
             this.buttonExportExcel.Name = "buttonExportExcel";
             this.buttonExportExcel.Size = new System.Drawing.Size(100, 30);
             this.buttonExportExcel.TabIndex = 3;
@@ -362,7 +410,7 @@ namespace ImpinjR700
             // 
             // buttonExportCsv
             // 
-            this.buttonExportCsv.Location = new System.Drawing.Point(22, 62);
+            this.buttonExportCsv.Location = new System.Drawing.Point(22, 70);
             this.buttonExportCsv.Name = "buttonExportCsv";
             this.buttonExportCsv.Size = new System.Drawing.Size(100, 30);
             this.buttonExportCsv.TabIndex = 2;
@@ -526,6 +574,7 @@ namespace ImpinjR700
             this.listStatistics.Columns.AddRange(new System.Windows.Forms.ColumnHeader[] {
             this.columnStatName,
             this.columnStatReadCount,
+            this.columnStatReadRate,
             this.columnStatCurrent,
             this.columnStatMax,
             this.columnStatMin,
@@ -577,6 +626,11 @@ namespace ImpinjR700
             // 
             this.columnStatReadCount.Text = "读取次数";
             this.columnStatReadCount.Width = 90;
+            // 
+            // columnStatReadRate
+            // 
+            this.columnStatReadRate.Text = "读取速率(次/秒)";
+            this.columnStatReadRate.Width = 110;
             // 
             // columnStatCurrent
             // 
@@ -669,6 +723,7 @@ namespace ImpinjR700
             this.groupConnection.PerformLayout();
             this.groupControl.ResumeLayout(false);
             this.groupControl.PerformLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.numericTimedReadDuration)).EndInit();
             this.groupExport.ResumeLayout(false);
             this.groupExport.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)(this.gridTags)).EndInit();
@@ -700,6 +755,9 @@ namespace ImpinjR700
         private System.Windows.Forms.Label labelReaderIp;
         private System.Windows.Forms.GroupBox groupControl;
         private System.Windows.Forms.Button buttonTestSignal;
+        private System.Windows.Forms.Button buttonTimedRead;
+        private System.Windows.Forms.Label labelTimedReadDuration;
+        private System.Windows.Forms.NumericUpDown numericTimedReadDuration;
         private System.Windows.Forms.CheckBox checkPlotSelectionOnly;
         private System.Windows.Forms.Button buttonAntennaConfig;
         private System.Windows.Forms.CheckedListBox checkedListAntennas;
@@ -729,6 +787,7 @@ namespace ImpinjR700
         private System.Windows.Forms.ListView listStatistics;
         private System.Windows.Forms.ColumnHeader columnStatName;
         private System.Windows.Forms.ColumnHeader columnStatReadCount;
+        private System.Windows.Forms.ColumnHeader columnStatReadRate;
         private System.Windows.Forms.ColumnHeader columnStatCurrent;
         private System.Windows.Forms.ColumnHeader columnStatMin;
         private System.Windows.Forms.ColumnHeader columnStatMean;
