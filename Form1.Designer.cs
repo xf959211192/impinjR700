@@ -228,7 +228,7 @@ namespace ImpinjR700
             this.textReaderIp.Name = "textReaderIp";
             this.textReaderIp.Size = new System.Drawing.Size(224, 23);
             this.textReaderIp.TabIndex = 1;
-            this.textReaderIp.Text = "169.254.1.1";
+            this.textReaderIp.Text = "192.168.15.2";
             // 
             // labelReaderIp
             // 

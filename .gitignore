@@ -33,3 +33,14 @@ packages/
 
 # 发布产物
 publish/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub/
+.pub-cache/
+build/
+android/.gradle/
+*.iml
+.idea/

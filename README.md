@@ -1,10 +1,54 @@
 ﻿# Impinj R700 RFID 管理工具
 
-该项目是一个基于 WinForms 的桌面程序，帮助用户快速管理 Impinj R700 读写器，实现设备接入、标签采集、RSSI 信号曲线可视化以及数据导出等一系列工作。
+该仓库当前包含两个项目：
+
+- `ImpinjR700`：基于 WinForms 的桌面程序，用于连接 Impinj R700、查看标签数据、绘制 RSSI / Phase 曲线并导出报表。
+- `mobile_app`：基于 Flutter 的 Android 移动端首版，用于在局域网内通过 `IoT Device Interface` 连接 R700、选择天线、开始/停止/定时读取，并实时查看标签与运行日志。
+
+桌面版负责完整的分析、绘图与导出能力；移动端首版优先覆盖现场连接与基础读取流程，不复用 `OctaneSDK`，而是直接调用 R700 的 HTTPS API 与事件流接口。
+
+## 📱 移动端（Flutter）
+
+移动端工程位于 [mobile_app](mobile_app/)，当前面向 Android 首版，已实现以下能力：
+
+- **安全连接**：输入读写器地址、用户名、密码后通过 HTTPS 连接；首次遇到新证书时，需要用户确认设备指纹。
+- **读取控制**：支持连接/断开、天线多选、开始读取、定时读取、停止读取。
+- **实时数据**：展示唯一标签数、总读取次数、当前状态，以及 EPC、天线、最新 RSSI、首次/最后读取时间等信息。
+- **运行日志**：记录连接结果、开始/停止、自动停止、异常、事件流关闭等关键过程。
+- **前台使用模型**：应用进入后台时会主动停止读取，并写入日志，避免后台持续盘存。
+
+### 移动端启动
+
+```bash
+cd mobile_app
+flutter pub get
+flutter run -d android
+```
+
+### 移动端测试与检查
+
+```bash
+cd mobile_app
+flutter analyze
+flutter test
+```
+
+### 移动端接口说明
+
+移动端直接调用 R700 `IoT Device Interface`，当前使用的核心接口如下：
+
+- `GET /api/v1/system`
+- `GET /api/v1/system/image`
+- `GET /api/v1/openapi.json`
+- `GET /api/v1/system/antenna-hub`
+- `GET /api/v1/status`
+- `POST /api/v1/profiles/inventory/start`
+- `POST /api/v1/profiles/stop`
+- `GET /api/v1/data/stream`
 
 ## ✨ 功能亮点
 
-- **设备管理**：输入读写器 IP（默认 `169.254.1.1`）即可连接或断开，状态栏和日志实时显示结果。
+- **设备管理**：输入读写器 IP（默认 `192.168.15.2`）即可连接或断开，状态栏和日志实时显示结果。
 - **读取控制**：支持选择天线端口、启停盘存、配置自动重连，多种异常情况都会写入运行日志。
 - **标签总览**：主表格实时刷新 EPC、天线、RSSI、相位（rad）、读取次数、首次/最新时间等字段；底部统计面板展示唯一标签数。
 - **双曲线绘图**：包含“信号曲线（RSSI）”与“相位曲线（Phase）”两个页签，按 `EPC + port` 分系列绘制，X 轴默认从 `0s` 起步并采用 `30s` 滚动窗口；历史绘图数据会持续保留，不再按点数裁剪。
@@ -54,7 +98,15 @@ dotnet restore
 dotnet build
 ```
 
-使用 Visual Studio / Rider / VS Code 打开解决方案即可调试。
+桌面版可直接用 Visual Studio / Rider / VS Code 打开解决方案调试。
+
+如果要调试移动端，请进入 `mobile_app/` 后使用 Flutter 工具链运行：
+
+```bash
+cd mobile_app
+flutter pub get
+flutter run -d android
+```
 
 ## 🗂️ 数据流说明
 
