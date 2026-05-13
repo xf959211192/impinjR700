@@ -11,6 +11,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Reflection;
+using System.Diagnostics;
+using System.Net.NetworkInformation;
+using System.Runtime.CompilerServices;
 using ClosedXML.Excel;
 using Impinj.OctaneSdk;
 
@@ -26,9 +29,20 @@ namespace ImpinjR700
         private ListViewItem? _statUniqueTagsItem;
         private string? _readerAddress;
         private bool _isReading;
+        private volatile bool _isReaderConnected;
         private CancellationTokenSource? _reconnectCts;
         private bool _isExporting;
         private bool _suppressAntennaAutoSave;
+#if DEBUG
+        private static readonly object DebugLogSync = new();
+        private static readonly string DebugLogFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "ImpinjR700",
+            $"debug-trace-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+        private static readonly Stopwatch DebugStopwatch = Stopwatch.StartNew();
+#else
+        private const string DebugLogFilePath = "";
+#endif
         private static readonly TimeSpan PlotRetentionWindow = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan StatisticsRefreshInterval = TimeSpan.FromMilliseconds(250);
         private const double PlotDisplayWindowSeconds = 30;
@@ -36,6 +50,9 @@ namespace ImpinjR700
         private static readonly int MaxReadHistoryRecords = 0;
         private static readonly TimeSpan PlotRenderThrottleInterval = TimeSpan.FromMilliseconds(50);
         private static readonly TimeSpan TagProcessInterval = TimeSpan.FromMilliseconds(20);
+        private static readonly TimeSpan ConnectionMonitorInterval = TimeSpan.FromSeconds(1);
+        private const int ConnectionMonitorTimeoutMs = 300;
+        private const int ConnectionMonitorFailureThreshold = 2;
         private const int MaxTagProcessBatchSize = 800;
         private static readonly TimeSpan SoundAlertMinInterval = TimeSpan.FromMilliseconds(800);
         private static readonly TimeSpan SoundAlertRecentActivityWindow = TimeSpan.FromMilliseconds(500);
@@ -77,6 +94,7 @@ namespace ImpinjR700
         private readonly System.Windows.Forms.Timer _tagProcessTimer;
         private readonly System.Windows.Forms.Timer _signalTestTimer;
         private readonly System.Windows.Forms.Timer _timedReadTimer;
+        private readonly System.Windows.Forms.Timer _connectionMonitorTimer;
         private readonly Random _signalNoiseRandom = new();
         private readonly ConcurrentQueue<PendingTagReportItem> _pendingTagQueue = new();
         private bool _plotRenderPending;
@@ -103,6 +121,8 @@ namespace ImpinjR700
         private int _soundAlertPlaying;
         private int _tagProcessScheduled;
         private int _reconnectLoopActive;
+        private int _connectionProbeActive;
+        private int _connectionProbeFailures;
         private DateTime _timedReadEndTimeUtc = DateTime.MinValue;
         private bool _isTimedReadActive;
         private bool _soundAlertEnabled = true;
@@ -167,7 +187,13 @@ namespace ImpinjR700
                 Interval = 200
             };
             _timedReadTimer.Tick += TimedReadTimer_Tick;
+            _connectionMonitorTimer = new System.Windows.Forms.Timer
+            {
+                Interval = (int)ConnectionMonitorInterval.TotalMilliseconds
+            };
+            _connectionMonitorTimer.Tick += ConnectionMonitorTimer_Tick;
             InitializeUiState();
+            TraceDebugState("DEBUG-TRACE-READY", extra: $"logFile={DebugLogFilePath}");
         }
 
         /// <summary>
@@ -210,6 +236,19 @@ namespace ImpinjR700
                 var maxTopHeight = Math.Max(120, splitMain.Height - splitMain.Panel2MinSize - splitMain.SplitterWidth);
                 splitMain.SplitterDistance = Math.Min(desiredTopHeight, maxTopHeight);
             }
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+#if DEBUG
+            if (keyData == (Keys.Control | Keys.Shift | Keys.D))
+            {
+                SimulateReaderConnectionLostForDebug();
+                return true;
+            }
+#endif
+
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         private void ResetPlotData()
@@ -373,6 +412,7 @@ namespace ImpinjR700
                 _soundAlertTimer.Stop();
                 _tagProcessTimer.Stop();
                 _timedReadTimer.Stop();
+                _connectionMonitorTimer.Stop();
                 ResetPendingTagQueue();
             };
 
@@ -647,8 +687,10 @@ namespace ImpinjR700
         private async Task ConnectAsync()
         {
             var address = textReaderIp.Text.Trim();
+            TraceDebugState("ConnectAsync ENTER", extra: $"address={address}");
             if (string.IsNullOrWhiteSpace(address))
             {
+                TraceDebugState("ConnectAsync VALIDATION_FAIL", extra: "emptyAddress");
                 MessageBox.Show(this, "请输入可用的读写器 IP 地址。", "连接提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -658,14 +700,19 @@ namespace ImpinjR700
 
             try
             {
+                TraceDebugState("ConnectAsync BEFORE CancelReconnect", extra: $"address={address}");
                 CancelReconnect();
-                var reader = await Task.Run(() => CreateAndConnectReader(address));
+                TraceDebugState("ConnectAsync BEFORE background connect", extra: $"address={address}");
+                var connection = await Task.Run(() => CreateConnectAndInitializeReader(address));
+                TraceDebugState("ConnectAsync AFTER background connect", connection.Reader, $"address={address}");
+                var reader = connection.Reader;
                 _reader = reader;
                 _readerAddress = address;
+                _isReaderConnected = true;
                 _isReading = false;
 
-                InitializeReaderOnConnect(_reader);
-                RefreshAntennaSelection(_reader);
+                TraceDebugState("ConnectAsync BEFORE ApplyAntennaSelectionAfterReaderSync", reader);
+                ApplyAntennaSelectionAfterReaderSync(connection.EnabledPorts);
 
                 UpdateStatus("已连接", Color.DarkGreen);
                 buttonDisconnect.Enabled = true;
@@ -673,16 +720,22 @@ namespace ImpinjR700
                 buttonTimedRead.Enabled = true;
                 buttonStop.Enabled = false;
                 UpdateAntennaConfigurationButtonState();
+                StartConnectionMonitor();
                 AppendLog($"成功连接至读写器 {address}。");
+                TraceDebugState("ConnectAsync SUCCESS", reader, $"address={address}");
             }
             catch (OctaneSdkException ex)
             {
+                _isReaderConnected = false;
+                TraceDebugState("ConnectAsync OCTANE_FAIL", extra: FormatDebugExceptionForTrace(ex));
                 AppendLog($"连接失败：{ex.Message}");
                 MessageBox.Show(this, $"连接失败：{ex.Message}", "连接错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 buttonConnect.Enabled = true;
             }
             catch (Exception ex)
             {
+                _isReaderConnected = false;
+                TraceDebugState("ConnectAsync FAIL", extra: FormatDebugExceptionForTrace(ex));
                 AppendLog($"连接失败：{ex.Message}");
                 MessageBox.Show(this, $"连接失败：{ex.Message}", "连接错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 buttonConnect.Enabled = true;
@@ -694,11 +747,50 @@ namespace ImpinjR700
         /// </summary>
         private ImpinjReader CreateAndConnectReader(string address)
         {
+            TraceDebugState("CreateAndConnectReader ENTER", extra: $"address={address}");
             var reader = new ImpinjReader();
+            TraceDebugState("CreateAndConnectReader CREATED reader", reader, $"address={address}");
             reader.ConnectionLost += Reader_ConnectionLost;
             reader.TagsReported += Reader_TagsReported;
-            reader.Connect(address);
+            TraceSdkCall("reader.Connect(address)", reader, () => reader.Connect(address));
+            TraceDebugState("CreateAndConnectReader CONNECTED", reader, $"address={address}");
             return reader;
+        }
+
+        /// <summary>
+        ///  在后台完成连接和设备初始化，避免 SDK 阻塞调用卡住界面线程。
+        /// </summary>
+        private ReaderConnectionResult CreateConnectAndInitializeReader(string address)
+        {
+            TraceDebugState("CreateConnectAndInitializeReader ENTER", extra: $"address={address}");
+            var reader = CreateAndConnectReader(address);
+            TraceDebugState("CreateConnectAndInitializeReader BEFORE InitializeReaderOnConnect", reader);
+            var enabledPorts = InitializeReaderOnConnect(reader);
+
+            var isConnected = TraceSdkCall("reader.IsConnected after initialize", reader, () => reader.IsConnected);
+            TraceDebugState(
+                "CreateConnectAndInitializeReader AFTER initialize",
+                reader,
+                $"isConnected={isConnected}; enabledPorts={FormatDebugPorts(enabledPorts)}");
+            if (!isConnected)
+            {
+                TraceDebugState("CreateConnectAndInitializeReader DISCONNECTED_DURING_INIT", reader);
+                SafeReleaseReader(reader);
+                throw new InvalidOperationException("读写器连接在初始化期间已断开。");
+            }
+
+            TraceDebugState("CreateConnectAndInitializeReader SUCCESS", reader, $"enabledPorts={FormatDebugPorts(enabledPorts)}");
+            return new ReaderConnectionResult(reader, enabledPorts);
+        }
+
+        private bool HasActiveReader()
+        {
+            return _reader != null && _isReaderConnected;
+        }
+
+        private ImpinjReader? GetActiveReader()
+        {
+            return _isReaderConnected ? _reader : null;
         }
 
         /// <summary>
@@ -706,42 +798,35 @@ namespace ImpinjR700
         /// </summary>
         private void Disconnect()
         {
+            TraceDebugState("Disconnect ENTER", _reader);
             StopSignalTest(logStop: false);
             CancelTimedRead();
             CancelReconnect();
+            StopConnectionMonitor();
             ResetSoundAlertState();
 
-            if (_reader != null)
+            var reader = _reader;
+            var wasReading = _isReading;
+            TraceDebugState("Disconnect CAPTURE reader", reader, $"wasReading={wasReading}");
+            _reader = null;
+            _isReaderConnected = false;
+            _readerAddress = null;
+            _isReading = false;
+
+            if (reader != null)
             {
-                try
+                if (wasReading)
                 {
-                    if (_isReading)
-                    {
-                        TryStopReader();
-                    }
-                    if (_reader.IsConnected)
-                    {
-                        _reader.Disconnect();
-                    }
+                    TraceDebugState("Disconnect queue StopAndReleaseReaderInBackground", reader);
+                    StopAndReleaseReaderInBackground(reader);
                 }
-                catch (OctaneSdkException ex)
+                else
                 {
-                    AppendLog($"断开连接时发生错误：{ex.Message}");
-                }
-                catch (Exception ex)
-                {
-                    AppendLog($"断开连接时发生意外：{ex.Message}");
-                }
-                finally
-                {
-                    _reader.ConnectionLost -= Reader_ConnectionLost;
-                    _reader.TagsReported -= Reader_TagsReported;
-                    _reader = null;
+                    TraceDebugState("Disconnect queue ReleaseReaderInBackground", reader);
+                    ReleaseReaderInBackground(reader);
                 }
             }
 
-            _readerAddress = null;
-            _isReading = false;
             numericTimedReadDuration.Enabled = true;
             UpdateStatus("未连接", Color.DarkRed);
             buttonConnect.Enabled = true;
@@ -751,6 +836,7 @@ namespace ImpinjR700
             buttonStop.Enabled = false;
             UpdateAntennaConfigurationButtonState();
             AppendLog("已断开与读写器的连接。");
+            TraceDebugState("Disconnect EXIT", reader);
         }
 
         /// <summary>
@@ -758,8 +844,11 @@ namespace ImpinjR700
         /// </summary>
         private void StartReading(bool timedRead)
         {
-            if (_reader == null || !_reader.IsConnected)
+            TraceDebugState("StartReading ENTER", _reader, $"timedRead={timedRead}");
+            var reader = GetActiveReader();
+            if (reader == null)
             {
+                TraceDebugState("StartReading NO_ACTIVE_READER", extra: $"timedRead={timedRead}");
                 MessageBox.Show(this, "请先成功连接读写器后再开始读取。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 buttonConnect.Enabled = true;
                 return;
@@ -772,6 +861,7 @@ namespace ImpinjR700
 
             try
             {
+                TraceDebugState("StartReading BEFORE CancelReconnect/CancelTimedRead", reader, $"timedRead={timedRead}");
                 CancelReconnect();
                 CancelTimedRead();
 
@@ -780,9 +870,11 @@ namespace ImpinjR700
                     .Select(item => item.Port)
                     .Distinct()
                     .ToList();
+                TraceDebugState("StartReading selectedPorts", reader, $"ports={FormatDebugPorts(selectedPorts)}; timedRead={timedRead}");
 
                 if (selectedPorts.Count == 0)
                 {
+                    TraceDebugState("StartReading NO_SELECTED_PORTS", reader);
                     var message = "请在“读取控制”区域勾选至少一个天线端口后再启动读取。";
                     AppendLog($"启动读取失败：{message}");
                     MessageBox.Show(this, message, "读取提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -792,14 +884,15 @@ namespace ImpinjR700
                     return;
                 }
 
-                var currentSettings = _reader.QuerySettings();
-                var settings = _reader.QueryDefaultSettings();
-                CopyAntennaConfiguration(_reader, currentSettings, settings);
-                ConfigureReaderSettings(_reader, settings);
+                var currentSettings = TraceSdkCall("reader.QuerySettings()", reader, () => reader.QuerySettings());
+                var settings = TraceSdkCall("reader.QueryDefaultSettings()", reader, () => reader.QueryDefaultSettings());
+                CopyAntennaConfiguration(reader, currentSettings, settings);
+                ConfigureReaderSettings(reader, settings);
                 ApplyAntennaSelection(settings, selectedPorts);
 
                 if (!HasEnabledAntenna(settings))
                 {
+                    TraceDebugState("StartReading NO_ENABLED_ANTENNA_AFTER_APPLY", reader, $"ports={FormatDebugPorts(selectedPorts)}");
                     var message = "当前天线全部关闭，请在“读取控制”区域勾选至少一个端口后再启动读取。";
                     AppendLog($"启动读取失败：{message}");
                     MessageBox.Show(this, message, "读取提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -809,11 +902,11 @@ namespace ImpinjR700
                     return;
                 }
 
-                _reader.ApplySettings(settings);
+                TraceSdkCall("reader.ApplySettings(settings)", reader, () => reader.ApplySettings(settings));
 
                 ClearTagData("已重置标签缓存，准备开始新一轮读取。");
 
-                _reader.Start();
+                TraceSdkCall("reader.Start()", reader, reader.Start);
                 _isReading = true;
                 _isTimedReadActive = timedRead;
                 if (_isTimedReadActive)
@@ -833,9 +926,11 @@ namespace ImpinjR700
                 AppendLog(_isTimedReadActive
                     ? $"定时读取已启动，计划读取 {GetTimedReadDurationSeconds()} 秒。"
                     : "标签读取已启动。");
+                TraceDebugState("StartReading SUCCESS", reader, $"timedRead={timedRead}");
             }
             catch (OctaneSdkException ex)
             {
+                TraceDebugState("StartReading OCTANE_FAIL", reader, FormatDebugExceptionForTrace(ex));
                 CancelTimedRead();
                 _isTimedReadActive = false;
                 numericTimedReadDuration.Enabled = true;
@@ -846,6 +941,7 @@ namespace ImpinjR700
             }
             catch (Exception ex)
             {
+                TraceDebugState("StartReading FAIL", reader, FormatDebugExceptionForTrace(ex));
                 CancelTimedRead();
                 _isTimedReadActive = false;
                 numericTimedReadDuration.Enabled = true;
@@ -861,13 +957,17 @@ namespace ImpinjR700
         /// </summary>
         private void StopReading(bool autoStopped = false)
         {
-            if (_reader == null || !_isReading)
+            TraceDebugState("StopReading ENTER", _reader, $"autoStopped={autoStopped}");
+            var reader = GetActiveReader();
+            if (reader == null || !_isReading)
             {
+                TraceDebugState("StopReading NOOP", reader, $"autoStopped={autoStopped}; hasReader={reader != null}");
                 CancelTimedRead();
                 return;
             }
 
-            TryStopReader();
+            TraceDebugState("StopReading queue StopReaderInBackground", reader, $"autoStopped={autoStopped}");
+            StopReaderInBackground(reader);
             ResetPendingTagQueue();
             ResetSoundAlertState();
             CancelTimedRead();
@@ -880,6 +980,7 @@ namespace ImpinjR700
             numericTimedReadDuration.Enabled = true;
             UpdateAntennaConfigurationButtonState();
             AppendLog(autoStopped ? "已到达设定读取时长，系统已自动暂停读取。" : "标签读取已停止。");
+            TraceDebugState("StopReading EXIT", reader, $"autoStopped={autoStopped}");
         }
 
         private int GetTimedReadDurationSeconds()
@@ -923,6 +1024,113 @@ namespace ImpinjR700
             UpdateTimedReadDurationToolTip(remaining);
         }
 
+        private void StartConnectionMonitor()
+        {
+            if (string.IsNullOrWhiteSpace(_readerAddress))
+            {
+                TraceDebugState("StartConnectionMonitor NO_ADDRESS");
+                return;
+            }
+
+            _connectionProbeFailures = 0;
+            Interlocked.Exchange(ref _connectionProbeActive, 0);
+            _connectionMonitorTimer.Stop();
+            _connectionMonitorTimer.Start();
+            TraceDebugState("StartConnectionMonitor START", _reader, $"address={_readerAddress}");
+        }
+
+        private void StopConnectionMonitor()
+        {
+            _connectionMonitorTimer.Stop();
+            _connectionProbeFailures = 0;
+            Interlocked.Exchange(ref _connectionProbeActive, 0);
+            TraceDebugState("StopConnectionMonitor STOP", _reader);
+        }
+
+        private void ConnectionMonitorTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!_isReaderConnected || string.IsNullOrWhiteSpace(_readerAddress))
+            {
+                TraceDebugState("ConnectionMonitorTimer_Tick STOP no active connection");
+                StopConnectionMonitor();
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _connectionProbeActive, 1) == 1)
+            {
+                TraceDebugState("ConnectionMonitorTimer_Tick SKIP probe active");
+                return;
+            }
+
+            var address = _readerAddress;
+            var reader = _reader;
+            TraceDebugState("ConnectionMonitorTimer_Tick PROBE_BEGIN", reader, $"address={address}");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var reachable = await ProbeReaderNetworkAsync(address);
+                    RunOnUiThread(() => HandleConnectionProbeResult(reader, address, reachable));
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _connectionProbeActive, 0);
+                }
+            });
+        }
+
+        private async Task<bool> ProbeReaderNetworkAsync(string address)
+        {
+            try
+            {
+                using var ping = new Ping();
+                var reply = await ping.SendPingAsync(address, ConnectionMonitorTimeoutMs);
+                var success = reply.Status == IPStatus.Success;
+                TraceDebugState(
+                    "ProbeReaderNetworkAsync RESULT",
+                    extra: $"address={address}; status={reply.Status}; roundtripMs={reply.RoundtripTime}; success={success}");
+                return success;
+            }
+            catch (Exception ex)
+            {
+                TraceDebugState("ProbeReaderNetworkAsync FAIL", extra: $"address={address}; {FormatDebugExceptionForTrace(ex)}");
+                return false;
+            }
+        }
+
+        private void HandleConnectionProbeResult(ImpinjReader? reader, string address, bool reachable)
+        {
+            if (!_isReaderConnected || !string.Equals(_readerAddress, address, StringComparison.OrdinalIgnoreCase))
+            {
+                TraceDebugState(
+                    "HandleConnectionProbeResult IGNORE stale result",
+                    reader,
+                    $"address={address}; reachable={reachable}");
+                return;
+            }
+
+            if (reachable)
+            {
+                _connectionProbeFailures = 0;
+                TraceDebugState("HandleConnectionProbeResult OK", reader, $"address={address}");
+                return;
+            }
+
+            _connectionProbeFailures++;
+            TraceDebugState(
+                "HandleConnectionProbeResult FAIL",
+                reader,
+                $"address={address}; failures={_connectionProbeFailures}/{ConnectionMonitorFailureThreshold}");
+
+            if (_connectionProbeFailures < ConnectionMonitorFailureThreshold)
+            {
+                return;
+            }
+
+            AppendLog($"连接监测：读写器 {address} 连续 {_connectionProbeFailures} 次无响应，按异常断线处理。");
+            HandleReaderConnectionLost(reader ?? _reader, releaseReader: true);
+        }
+
         private void UpdateTimedReadDurationToolTip(TimeSpan? remaining = null)
         {
             if (_isReading && remaining.HasValue)
@@ -937,26 +1145,28 @@ namespace ImpinjR700
         /// <summary>
         ///  安全停止读写器读取。
         /// </summary>
-        private void TryStopReader()
+        private void TryStopReader(ImpinjReader reader)
         {
-            if (_reader == null)
+            TraceDebugState("TryStopReader ENTER", reader);
+            if (reader == null)
             {
+                TraceDebugState("TryStopReader NULL_READER");
                 return;
             }
 
             try
             {
-                if (_reader.IsConnected)
-                {
-                    _reader.Stop();
-                }
+                TraceSdkCall("reader.Stop()", reader, reader.Stop);
+                TraceDebugState("TryStopReader SUCCESS", reader);
             }
             catch (OctaneSdkException ex)
             {
+                TraceDebugState("TryStopReader OCTANE_FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"停止读取时发生错误：{ex.Message}");
             }
             catch (Exception ex)
             {
+                TraceDebugState("TryStopReader FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"停止读取时发生意外：{ex.Message}");
             }
         }
@@ -1031,6 +1241,13 @@ namespace ImpinjR700
             AppendLog($"初始化天线状态（离线）：{FormatAntennaSelection(storedSelection)}");
         }
 
+        private void ApplyAntennaSelectionAfterReaderSync(IEnumerable<ushort>? enabledPorts)
+        {
+            var ports = enabledPorts?.ToHashSet() ?? LoadStoredAntennaSelection();
+            ApplyAntennaSelectionToUi(ports);
+            AppendLog($"天线UI同步：{FormatAntennaSelection(ports)}");
+        }
+
         private static void PersistAntennaSelection(IEnumerable<ushort> ports)
         {
             try
@@ -1055,35 +1272,50 @@ namespace ImpinjR700
         /// </summary>
         private void EnableAllAntennaPorts()
         {
+            TraceDebugState("EnableAllAntennaPorts ENTER", _reader);
+            UpdateCheckedListToAllSelected();
+
+            var reader = GetActiveReader();
+            if (reader == null)
+            {
+                TraceDebugState("EnableAllAntennaPorts NO_ACTIVE_READER");
+                return;
+            }
+
+            TraceDebugState("EnableAllAntennaPorts queue background", reader);
+            _ = Task.Run(() => EnableAllAntennaPortsOnReader(reader));
+        }
+
+        private void EnableAllAntennaPortsOnReader(ImpinjReader reader)
+        {
+            TraceDebugState("EnableAllAntennaPortsOnReader ENTER", reader);
             try
             {
-                UpdateCheckedListToAllSelected();
-
-                if (_reader == null || !_reader.IsConnected)
-                {
-                    return;
-                }
-
-                var settings = _reader.QuerySettings();
+                var settings = TraceSdkCall("reader.QuerySettings()", reader, () => reader.QuerySettings());
                 if (settings == null)
                 {
+                    TraceDebugState("EnableAllAntennaPortsOnReader NULL_SETTINGS", reader);
                     return;
                 }
 
                 if (!EnsureAllPortsEnabled(settings))
                 {
+                    TraceDebugState("EnableAllAntennaPortsOnReader NO_CHANGE", reader);
                     return;
                 }
 
-                _reader.ApplySettings(settings);
+                TraceSdkCall("reader.ApplySettings(settings)", reader, () => reader.ApplySettings(settings));
                 AppendLog("已恢复天线为全端口启用状态。");
+                TraceDebugState("EnableAllAntennaPortsOnReader SUCCESS", reader);
             }
             catch (OctaneSdkException ex)
             {
+                TraceDebugState("EnableAllAntennaPortsOnReader OCTANE_FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"恢复全端口启用失败：{ex.Message}");
             }
             catch (Exception ex)
             {
+                TraceDebugState("EnableAllAntennaPortsOnReader FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"恢复全端口启用时发生意外：{ex.Message}");
             }
         }
@@ -1124,7 +1356,7 @@ namespace ImpinjR700
                 return;
             }
 
-            if (_reader == null || !_reader.IsConnected)
+            if (!HasActiveReader())
             {
                 return;
             }
@@ -1146,8 +1378,10 @@ namespace ImpinjR700
 
         private void AutoSaveAntennaSelection()
         {
+            TraceDebugState("AutoSaveAntennaSelection ENTER", _reader);
             if (_suppressAntennaAutoSave)
             {
+                TraceDebugState("AutoSaveAntennaSelection SUPPRESSED");
                 return;
             }
 
@@ -1158,44 +1392,57 @@ namespace ImpinjR700
                 .ToList();
 
             PersistAntennaSelection(selectedPorts);
+            TraceDebugState("AutoSaveAntennaSelection persisted local", _reader, $"ports={FormatDebugPorts(selectedPorts)}");
 
-            if (_reader == null || !_reader.IsConnected)
+            var reader = GetActiveReader();
+            if (reader == null)
             {
+                TraceDebugState("AutoSaveAntennaSelection NO_ACTIVE_READER", extra: $"ports={FormatDebugPorts(selectedPorts)}");
                 return;
             }
 
+            TraceDebugState("AutoSaveAntennaSelection queue background", reader, $"ports={FormatDebugPorts(selectedPorts)}");
+            _ = Task.Run(() => AutoSaveAntennaSelectionOnReader(reader, selectedPorts));
+        }
+
+        private void AutoSaveAntennaSelectionOnReader(ImpinjReader reader, IReadOnlyCollection<ushort> selectedPorts)
+        {
+            TraceDebugState("AutoSaveAntennaSelectionOnReader ENTER", reader, $"ports={FormatDebugPorts(selectedPorts)}");
             try
             {
                 if (selectedPorts.Count == 0)
                 {
+                    TraceDebugState("AutoSaveAntennaSelectionOnReader NO_PORTS", reader);
                     return;
                 }
 
-                var currentSettings = _reader.QuerySettings();
-                var settings = _reader.QueryDefaultSettings();
-                CopyAntennaConfiguration(_reader, currentSettings, settings);
-                ConfigureReaderSettings(_reader, settings);
+                var currentSettings = TraceSdkCall("reader.QuerySettings()", reader, () => reader.QuerySettings());
+                var settings = TraceSdkCall("reader.QueryDefaultSettings()", reader, () => reader.QueryDefaultSettings());
+                CopyAntennaConfiguration(reader, currentSettings, settings);
+                ConfigureReaderSettings(reader, settings);
                 ApplyAntennaSelection(settings, selectedPorts);
 
                 if (!HasEnabledAntenna(settings))
                 {
+                    TraceDebugState("AutoSaveAntennaSelectionOnReader NO_ENABLED_ANTENNA", reader, $"ports={FormatDebugPorts(selectedPorts)}");
                     return;
                 }
 
-                _reader.ApplySettings(settings);
+                TraceSdkCall("reader.ApplySettings(settings)", reader, () => reader.ApplySettings(settings));
                 PersistAntennaSelection(selectedPorts);
                 AppendLog("天线启用状态已自动保存。");
-                UpdateAntennaConfigurationButtonState();
+                RunOnUiThread(UpdateAntennaConfigurationButtonState);
+                TraceDebugState("AutoSaveAntennaSelectionOnReader SUCCESS", reader, $"ports={FormatDebugPorts(selectedPorts)}");
             }
             catch (OctaneSdkException ex)
             {
+                TraceDebugState("AutoSaveAntennaSelectionOnReader OCTANE_FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"自动保存天线状态失败：{ex.Message}");
-                MessageBox.Show(this, $"自动保存天线状态失败：{ex.Message}", "通信错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             catch (Exception ex)
             {
+                TraceDebugState("AutoSaveAntennaSelectionOnReader FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"自动保存天线状态时发生意外：{ex.Message}");
-                MessageBox.Show(this, $"自动保存天线状态时发生意外：{ex.Message}", "系统错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
         private static bool EnsureAllPortsEnabled(Settings settings)
@@ -1278,11 +1525,13 @@ namespace ImpinjR700
                 destination.RxSensitivityInDbm = antenna.RxSensitivityInDbm;
             }
         }
-        private void InitializeReaderOnConnect(ImpinjReader reader)
+        private List<ushort>? InitializeReaderOnConnect(ImpinjReader reader)
         {
+            TraceDebugState("InitializeReaderOnConnect ENTER", reader);
             if (reader == null)
             {
-                return;
+                TraceDebugState("InitializeReaderOnConnect NULL_READER");
+                return null;
             }
 
             try
@@ -1291,13 +1540,15 @@ namespace ImpinjR700
 
                 try
                 {
-                    settings = reader.QuerySettings();
+                    settings = TraceSdkCall("reader.QuerySettings()", reader, () => reader.QuerySettings());
                     AppendLog("连接初始化：加载持久化配置成功。");
+                    TraceDebugState("InitializeReaderOnConnect QuerySettings SUCCESS", reader);
                 }
                 catch (OctaneSdkException ex) when (ex.Message.Contains("not been configured"))
                 {
+                    TraceDebugState("InitializeReaderOnConnect UNCONFIGURED", reader, FormatDebugExceptionForTrace(ex));
                     AppendLog("连接初始化：检测到未配置设备，初始化中...");
-                    settings = reader.QueryDefaultSettings();
+                    settings = TraceSdkCall("reader.QueryDefaultSettings()", reader, () => reader.QueryDefaultSettings());
 
                     var ant = settings.Antennas?.GetAntenna(1);
                     if (ant != null)
@@ -1306,24 +1557,28 @@ namespace ImpinjR700
                         ant.TxPowerInDbm = 30;
                     }
 
-                    reader.ApplySettings(settings);
-                    reader.SaveSettings();
+                    TraceSdkCall("reader.ApplySettings(settings)", reader, () => reader.ApplySettings(settings));
+                    TraceSdkCall("reader.SaveSettings()", reader, reader.SaveSettings);
 
                     AppendLog("连接初始化：默认配置已写入保存。");
                 }
 
+                TraceDebugState("InitializeReaderOnConnect BEFORE ConfigureReaderSettings", reader);
                 ConfigureReaderSettings(reader, settings);
-                reader.ApplySettings(settings);
+                TraceSdkCall("reader.ApplySettings(settings)", reader, () => reader.ApplySettings(settings));
 
                 var enabledPorts = ReadEnabledPorts(settings).ToList();
                 PersistAntennaSelection(enabledPorts);
-                ApplyAntennaSelectionToUi(enabledPorts);
 
                 AppendLog("连接初始化：配置应用完成。");
+                TraceDebugState("InitializeReaderOnConnect SUCCESS", reader, $"enabledPorts={FormatDebugPorts(enabledPorts)}");
+                return enabledPorts;
             }
             catch (Exception ex)
             {
+                TraceDebugState("InitializeReaderOnConnect FAIL", reader, FormatDebugExceptionForTrace(ex));
                 AppendLog($"连接初始化时发生意外：{ex.Message}");
+                return null;
             }
         }
 
@@ -1415,15 +1670,16 @@ namespace ImpinjR700
         /// <summary>
         ///  判断读写器是否支持指定模式。
         /// </summary>
-        private static bool IsReaderModeSupported(ImpinjReader reader, ReaderMode mode)
+        private bool IsReaderModeSupported(ImpinjReader reader, ReaderMode mode)
         {
             try
             {
-                var featureSet = reader.QueryFeatureSet();
+                var featureSet = TraceSdkCall("reader.QueryFeatureSet()", reader, () => reader.QueryFeatureSet());
                 return featureSet.ReaderModes?.Contains(mode) ?? false;
             }
             catch
             {
+                TraceDebugState("IsReaderModeSupported FAIL", reader, $"mode={mode}");
                 return false;
             }
         }
@@ -2763,36 +3019,110 @@ namespace ImpinjR700
             return antennaPort == 0 ? "未知" : $"天线 {antennaPort}";
         }
 
+        private static string FormatDebugPorts(IEnumerable<ushort>? ports)
+        {
+            return ports == null ? "null" : string.Join(",", ports.OrderBy(port => port));
+        }
+
+        private static string FormatDebugExceptionForTrace(Exception ex)
+        {
+            return $"{ex.GetType().FullName}: {ex.Message}";
+        }
+
         /// <summary>
         ///  处理读写器连接丢失事件。
         /// </summary>
         private void Reader_ConnectionLost(ImpinjReader reader)
         {
+            TraceDebugState("Reader_ConnectionLost ENTER", reader);
+            _isReaderConnected = false;
+            _isReading = false;
+
             if (!IsHandleCreated || IsDisposed)
             {
+                TraceDebugState("Reader_ConnectionLost DROP no handle/disposed", reader);
                 return;
             }
 
-            BeginInvoke(new Action(() =>
-            {
-                CancelTimedRead();
-                AppendLog("读写器连接已丢失。");
-                UpdateStatus("未连接", Color.DarkRed);
-                buttonStart.Enabled = false;
-                buttonTimedRead.Enabled = false;
-                buttonStop.Enabled = false;
-                buttonDisconnect.Enabled = false;
-                buttonConnect.Enabled = true;
-                numericTimedReadDuration.Enabled = true;
-                _isReading = false;
-                UpdateAntennaConfigurationButtonState();
+            TraceDebugState("Reader_ConnectionLost queue UI handler", reader);
+            RunOnUiThread(() => HandleReaderConnectionLost(reader, releaseReader: true));
+        }
 
-                if (checkAutoReconnect.Checked)
+#if DEBUG
+        private void SimulateReaderConnectionLostForDebug()
+        {
+            TraceDebugState("SimulateReaderConnectionLostForDebug ENTER", _reader);
+            if (!IsHandleCreated || IsDisposed)
+            {
+                TraceDebugState("SimulateReaderConnectionLostForDebug DROP no handle/disposed", _reader);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(_readerAddress))
+            {
+                var address = textReaderIp.Text.Trim();
+                _readerAddress = string.IsNullOrWhiteSpace(address) ? "192.0.2.1" : address;
+                textReaderIp.Text = _readerAddress;
+            }
+
+            AppendLog("Debug：已触发模拟异常断线（Ctrl + Shift + D）。");
+            TraceDebugState("SimulateReaderConnectionLostForDebug dispatch", _reader);
+            HandleReaderConnectionLost(_reader, releaseReader: true);
+        }
+#endif
+
+        private void HandleReaderConnectionLost(ImpinjReader? reader, bool releaseReader)
+        {
+            TraceDebugState("HandleReaderConnectionLost ENTER", reader, $"releaseReader={releaseReader}");
+            _isReaderConnected = false;
+            _isReading = false;
+
+            if (!IsHandleCreated || IsDisposed)
+            {
+                TraceDebugState("HandleReaderConnectionLost DROP no handle/disposed", reader);
+                return;
+            }
+
+            StopConnectionMonitor();
+
+            var isCurrentReader = reader != null && ReferenceEquals(_reader, reader);
+            if (reader != null && _reader != null && !isCurrentReader)
+            {
+                TraceDebugState("HandleReaderConnectionLost stale reader update UI only", reader);
+            }
+
+            if (isCurrentReader)
+            {
+                _reader = null;
+                if (releaseReader)
                 {
-                    AppendLog("自动重连已开启，准备尝试重新连接。");
-                    BeginReconnectLoop();
+                    TraceDebugState("HandleReaderConnectionLost queue ReleaseReaderInBackground", reader);
+                    ReleaseReaderInBackground(reader!);
                 }
-            }));
+            }
+
+            CancelTimedRead();
+            AppendLog("读写器连接已丢失。");
+            UpdateStatus("未连接", Color.DarkRed);
+            buttonStart.Enabled = false;
+            buttonTimedRead.Enabled = false;
+            buttonStop.Enabled = false;
+            buttonDisconnect.Enabled = false;
+            buttonConnect.Enabled = true;
+            numericTimedReadDuration.Enabled = true;
+            _isReading = false;
+            UpdateAntennaConfigurationButtonState();
+
+            if (checkAutoReconnect.Checked)
+            {
+                AppendLog("自动重连已开启，准备尝试重新连接。");
+                TraceDebugState("HandleReaderConnectionLost autoReconnect checked", reader);
+                BeginReconnectLoop();
+            }
+            else
+            {
+                TraceDebugState("HandleReaderConnectionLost autoReconnect disabled", reader);
+            }
         }
 
         /// <summary>
@@ -2837,57 +3167,82 @@ namespace ImpinjR700
         /// </summary>
         private void BeginReconnectLoop()
         {
+            TraceDebugState("BeginReconnectLoop ENTER");
             if (string.IsNullOrWhiteSpace(_readerAddress))
             {
+                TraceDebugState("BeginReconnectLoop NO_ADDRESS");
                 AppendLog("缺少读写器地址，无法执行自动重连。");
                 return;
             }
 
             if (Interlocked.Exchange(ref _reconnectLoopActive, 1) == 1)
             {
+                TraceDebugState("BeginReconnectLoop ALREADY_RUNNING");
                 AppendLog("自动重连任务已在运行，忽略重复启动。");
                 return;
             }
 
+            TraceDebugState("BeginReconnectLoop BEFORE CancelReconnect");
             CancelReconnect();
             _reconnectCts = new CancellationTokenSource();
             var token = _reconnectCts.Token;
             var readerAddress = _readerAddress;
+            TraceDebugState("BeginReconnectLoop START_TASK", extra: $"readerAddress={readerAddress}");
 
             Task.Run(async () =>
             {
+                TraceDebugState("BeginReconnectLoop TASK_ENTER", extra: $"readerAddress={readerAddress}");
                 try
                 {
                     while (!token.IsCancellationRequested)
                     {
                         try
                         {
+                            TraceDebugState("BeginReconnectLoop ATTEMPT_BEGIN", extra: $"readerAddress={readerAddress}");
                             AppendLog("正在尝试重新连接读写器...");
-                            var reader = CreateAndConnectReader(readerAddress);
+                            var connection = CreateConnectAndInitializeReader(readerAddress);
+                            TraceDebugState("BeginReconnectLoop ATTEMPT_SUCCESS", connection.Reader, $"readerAddress={readerAddress}");
                             if (token.IsCancellationRequested)
                             {
-                                SafeReleaseReader(reader);
+                                TraceDebugState("BeginReconnectLoop CANCELED_AFTER_SUCCESS", connection.Reader);
+                                SafeReleaseReader(connection.Reader);
                                 return;
                             }
 
-                            RunOnUiThread(() => CompleteReconnect(reader));
+                            RunOnUiThread(() =>
+                            {
+                                TraceDebugState("BeginReconnectLoop UI_COMPLETE_ENTER", connection.Reader);
+                                if (token.IsCancellationRequested)
+                                {
+                                    TraceDebugState("BeginReconnectLoop UI_COMPLETE_CANCELED", connection.Reader);
+                                    ReleaseReaderInBackground(connection.Reader);
+                                    return;
+                                }
+
+                                CompleteReconnect(connection);
+                            });
                             return;
                         }
                         catch (OctaneSdkException ex)
                         {
+                            TraceDebugState("BeginReconnectLoop ATTEMPT_OCTANE_FAIL", extra: FormatDebugExceptionForTrace(ex));
                             AppendLog($"重连失败：{ex.Message}，将于 5 秒后重试。");
                         }
                         catch (Exception ex)
                         {
+                            TraceDebugState("BeginReconnectLoop ATTEMPT_FAIL", extra: FormatDebugExceptionForTrace(ex));
                             AppendLog($"重连失败：{ex.Message}，将于 5 秒后重试。");
                         }
 
                         try
                         {
+                            TraceDebugState("BeginReconnectLoop DELAY_BEGIN");
                             await Task.Delay(TimeSpan.FromSeconds(5), token);
+                            TraceDebugState("BeginReconnectLoop DELAY_END");
                         }
                         catch (TaskCanceledException)
                         {
+                            TraceDebugState("BeginReconnectLoop DELAY_CANCELED");
                             return;
                         }
                     }
@@ -2895,6 +3250,7 @@ namespace ImpinjR700
                 finally
                 {
                     Interlocked.Exchange(ref _reconnectLoopActive, 0);
+                    TraceDebugState("BeginReconnectLoop TASK_EXIT");
                 }
             }, token);
         }
@@ -2904,17 +3260,21 @@ namespace ImpinjR700
         /// </summary>
         private void CancelReconnect()
         {
+            TraceDebugState("CancelReconnect ENTER");
             if (_reconnectCts == null)
             {
+                TraceDebugState("CancelReconnect NOOP");
                 return;
             }
 
             if (!_reconnectCts.IsCancellationRequested)
             {
+                TraceDebugState("CancelReconnect CANCEL");
                 _reconnectCts.Cancel();
             }
             _reconnectCts.Dispose();
             _reconnectCts = null;
+            TraceDebugState("CancelReconnect EXIT");
         }
 
 
@@ -2923,7 +3283,8 @@ namespace ImpinjR700
         /// </summary>
         private void ShowReaderInfo()
         {
-            if (_reader == null || !_reader.IsConnected)
+            var reader = GetActiveReader();
+            if (reader == null)
             {
                 MessageBox.Show(this, "当前未连接读写器，请先连接后再查看。", "读写器信息", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -2931,8 +3292,8 @@ namespace ImpinjR700
 
             try
             {
-                var info = new ReaderInfo(_reader.Name, _reader.Address);
-                info.Refresh(_reader);
+                var info = new ReaderInfo(reader.Name, reader.Address);
+                info.Refresh(reader);
 
                 var builder = new StringBuilder();
                 builder.AppendLine("读写器信息：");
@@ -3139,7 +3500,7 @@ namespace ImpinjR700
         /// </summary>
         private void UpdateAntennaConfigurationButtonState()
         {
-            var canConfigure = _reader != null && _reader.IsConnected;
+            var canConfigure = HasActiveReader();
             buttonAntennaConfig.Enabled = canConfigure;
         }
 
@@ -3174,7 +3535,8 @@ namespace ImpinjR700
         /// </summary>
         private void ShowAntennaConfigurationDialog()
         {
-            if (_reader == null || !_reader.IsConnected)
+            var reader = GetActiveReader();
+            if (reader == null)
             {
                 MessageBox.Show(this, "请先连接读写器后再配置天线。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 UpdateAntennaConfigurationButtonState();
@@ -3187,14 +3549,14 @@ namespace ImpinjR700
                 return;
             }
 
-            using var dialog = new AntennaConfigurationForm(_reader);
+            using var dialog = new AntennaConfigurationForm(reader);
             try
             {
                 var result = dialog.ShowDialog(this);
                 if (result == DialogResult.OK)
                 {
                     AppendLog("已应用详细天线配置。");
-                    RefreshAntennaSelection(_reader);
+                    RefreshAntennaSelection(reader);
                 }
             }
             catch (OctaneSdkException ex)
@@ -3483,6 +3845,7 @@ namespace ImpinjR700
         /// </summary>
         private void AppendLog(string message)
         {
+            TraceDebugState("UI_LOG", extra: message);
             if (InvokeRequired)
             {
                 RunOnUiThread(() => AppendLog(message));
@@ -3534,27 +3897,177 @@ namespace ImpinjR700
             action();
         }
 
+        private void TraceDebugState(
+            string eventName,
+            ImpinjReader? reader = null,
+            string? extra = null,
+            [CallerMemberName] string caller = "")
+        {
+#if DEBUG
+            AppendDebugTrace(eventName, reader, extra, caller);
+#endif
+        }
+
+        private void TraceSdkCall(
+            string operation,
+            ImpinjReader? reader,
+            Action action,
+            [CallerMemberName] string caller = "")
+        {
+#if DEBUG
+            var stopwatch = Stopwatch.StartNew();
+            AppendDebugTrace($"SDK BEGIN {operation}", reader, null, caller);
+            try
+            {
+                action();
+                stopwatch.Stop();
+                AppendDebugTrace($"SDK END {operation}", reader, $"elapsedMs={stopwatch.ElapsedMilliseconds}", caller);
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                AppendDebugTrace(
+                    $"SDK FAIL {operation}",
+                    reader,
+                    $"elapsedMs={stopwatch.ElapsedMilliseconds}; exception={FormatDebugException(ex)}",
+                    caller);
+                throw;
+            }
+#else
+            action();
+#endif
+        }
+
+        private T TraceSdkCall<T>(
+            string operation,
+            ImpinjReader? reader,
+            Func<T> action,
+            [CallerMemberName] string caller = "")
+        {
+#if DEBUG
+            var stopwatch = Stopwatch.StartNew();
+            AppendDebugTrace($"SDK BEGIN {operation}", reader, null, caller);
+            try
+            {
+                var result = action();
+                stopwatch.Stop();
+                AppendDebugTrace(
+                    $"SDK END {operation}",
+                    reader,
+                    $"elapsedMs={stopwatch.ElapsedMilliseconds}; resultType={typeof(T).Name}",
+                    caller);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                AppendDebugTrace(
+                    $"SDK FAIL {operation}",
+                    reader,
+                    $"elapsedMs={stopwatch.ElapsedMilliseconds}; exception={FormatDebugException(ex)}",
+                    caller);
+                throw;
+            }
+#else
+            return action();
+#endif
+        }
+
+#if DEBUG
+        private void AppendDebugTrace(
+            string eventName,
+            ImpinjReader? reader,
+            string? extra,
+            string caller)
+        {
+            try
+            {
+                var directory = Path.GetDirectoryName(DebugLogFilePath);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                var currentReaderId = _reader == null ? "null" : RuntimeHelpers.GetHashCode(_reader).ToString();
+                var targetReaderId = reader == null ? "null" : RuntimeHelpers.GetHashCode(reader).ToString();
+                var invokeRequired = SafeDebugValue(() => InvokeRequired.ToString(), "unknown");
+                var handleCreated = SafeDebugValue(() => IsHandleCreated.ToString(), "unknown");
+                var disposed = SafeDebugValue(() => IsDisposed.ToString(), "unknown");
+                var reconnectActive = Volatile.Read(ref _reconnectLoopActive);
+                var line = string.Join(
+                    " | ",
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    $"elapsedMs={DebugStopwatch.ElapsedMilliseconds}",
+                    $"event={eventName}",
+                    $"caller={caller}",
+                    $"thread={Environment.CurrentManagedThreadId}",
+                    $"task={Task.CurrentId?.ToString() ?? "null"}",
+                    $"invokeRequired={invokeRequired}",
+                    $"handleCreated={handleCreated}",
+                    $"disposed={disposed}",
+                    $"readerAddress={_readerAddress ?? "null"}",
+                    $"isReaderConnected={_isReaderConnected}",
+                    $"isReading={_isReading}",
+                    $"isTimedReadActive={_isTimedReadActive}",
+                    $"reconnectLoopActive={reconnectActive}",
+                    $"currentReaderId={currentReaderId}",
+                    $"targetReaderId={targetReaderId}",
+                    $"extra={extra ?? ""}");
+
+                lock (DebugLogSync)
+                {
+                    File.AppendAllText(DebugLogFilePath, line + Environment.NewLine, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+                // DEBUG 日志不能影响主流程。
+            }
+        }
+
+        private static string SafeDebugValue(Func<string> valueFactory, string fallback)
+        {
+            try
+            {
+                return valueFactory();
+            }
+            catch
+            {
+                return fallback;
+            }
+        }
+
+        private static string FormatDebugException(Exception ex)
+        {
+            return $"{ex.GetType().FullName}: {ex.Message}";
+        }
+#endif
+
         /// <summary>
         ///  完成自动重连后的状态恢复，统一与首次连接保持一致。
         /// </summary>
-        private void CompleteReconnect(ImpinjReader reader)
+        private void CompleteReconnect(ReaderConnectionResult connection)
         {
+            var reader = connection.Reader;
+            TraceDebugState("CompleteReconnect ENTER", reader, $"enabledPorts={FormatDebugPorts(connection.EnabledPorts)}");
             if (IsDisposed)
             {
-                SafeReleaseReader(reader);
+                TraceDebugState("CompleteReconnect DISPOSED queue release", reader);
+                ReleaseReaderInBackground(reader);
                 return;
             }
 
             var previousReader = _reader;
             if (previousReader != null && !ReferenceEquals(previousReader, reader))
             {
-                SafeReleaseReader(previousReader);
+                TraceDebugState("CompleteReconnect release previous reader", previousReader);
+                ReleaseReaderInBackground(previousReader);
             }
 
             _reader = reader;
+            _isReaderConnected = true;
             _isReading = false;
-            InitializeReaderOnConnect(reader);
-            RefreshAntennaSelection(reader);
+            ApplyAntennaSelectionAfterReaderSync(connection.EnabledPorts);
             UpdateStatus("已连接", Color.DarkGreen);
             buttonConnect.Enabled = false;
             buttonDisconnect.Enabled = true;
@@ -3563,7 +4076,43 @@ namespace ImpinjR700
             buttonStop.Enabled = false;
             numericTimedReadDuration.Enabled = true;
             UpdateAntennaConfigurationButtonState();
+            StartConnectionMonitor();
             AppendLog("重连成功。");
+            TraceDebugState("CompleteReconnect SUCCESS", reader);
+        }
+
+        private void ReleaseReaderInBackground(ImpinjReader reader)
+        {
+            TraceDebugState("ReleaseReaderInBackground QUEUE", reader);
+            _ = Task.Run(() =>
+            {
+                TraceDebugState("ReleaseReaderInBackground TASK_ENTER", reader);
+                SafeReleaseReader(reader);
+                TraceDebugState("ReleaseReaderInBackground TASK_EXIT", reader);
+            });
+        }
+
+        private void StopReaderInBackground(ImpinjReader reader)
+        {
+            TraceDebugState("StopReaderInBackground QUEUE", reader);
+            _ = Task.Run(() =>
+            {
+                TraceDebugState("StopReaderInBackground TASK_ENTER", reader);
+                TryStopReader(reader);
+                TraceDebugState("StopReaderInBackground TASK_EXIT", reader);
+            });
+        }
+
+        private void StopAndReleaseReaderInBackground(ImpinjReader reader)
+        {
+            TraceDebugState("StopAndReleaseReaderInBackground QUEUE", reader);
+            _ = Task.Run(() =>
+            {
+                TraceDebugState("StopAndReleaseReaderInBackground TASK_ENTER", reader);
+                TryStopReader(reader);
+                SafeReleaseReader(reader);
+                TraceDebugState("StopAndReleaseReaderInBackground TASK_EXIT", reader);
+            });
         }
 
         /// <summary>
@@ -3571,21 +4120,36 @@ namespace ImpinjR700
         /// </summary>
         private void SafeReleaseReader(ImpinjReader reader)
         {
+            TraceDebugState("SafeReleaseReader ENTER", reader);
             try
             {
-                if (reader.IsConnected)
-                {
-                    reader.Disconnect();
-                }
+                TraceSdkCall("reader.Disconnect()", reader, reader.Disconnect);
+                TraceDebugState("SafeReleaseReader DISCONNECT_SUCCESS", reader);
             }
             catch
             {
+                TraceDebugState("SafeReleaseReader DISCONNECT_IGNORED_EXCEPTION", reader);
             }
             finally
             {
+                TraceDebugState("SafeReleaseReader UNSUBSCRIBE_EVENTS", reader);
                 reader.ConnectionLost -= Reader_ConnectionLost;
                 reader.TagsReported -= Reader_TagsReported;
+                TraceDebugState("SafeReleaseReader EXIT", reader);
             }
+        }
+
+        private sealed class ReaderConnectionResult
+        {
+            public ReaderConnectionResult(ImpinjReader reader, IReadOnlyCollection<ushort>? enabledPorts)
+            {
+                Reader = reader;
+                EnabledPorts = enabledPorts;
+            }
+
+            public ImpinjReader Reader { get; }
+
+            public IReadOnlyCollection<ushort>? EnabledPorts { get; }
         }
 
         /// <summary>
