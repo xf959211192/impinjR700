@@ -131,6 +131,11 @@ namespace ImpinjR700
         private readonly Dictionary<string, ushort> _signalReadCountByEpc = new();
         private readonly CheckBox _checkShowLegend = new();
         private readonly CheckBox _checkSoundAlert = new();
+        private readonly CheckBox _checkSplitPlotByEpc = new();
+        private readonly Panel _panelSplitRssiPlots = new();
+        private readonly Panel _panelSplitPhasePlots = new();
+        private readonly Dictionary<string, ScottPlot.WinForms.FormsPlot> _splitRssiPlotsByEpc = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, ScottPlot.WinForms.FormsPlot> _splitPhasePlotsByEpc = new(StringComparer.Ordinal);
         private readonly Font _uiTitleFont = new(PlotFontName, UiTitleFontSize, FontStyle.Regular, GraphicsUnit.Point);
         private readonly Font _uiBodyFont = new(PlotFontName, UiBodyFontSize, FontStyle.Regular, GraphicsUnit.Point);
         private readonly Font _uiBodyBoldFont = new(PlotFontName, UiBodyFontSize, FontStyle.Bold, GraphicsUnit.Point);
@@ -205,6 +210,8 @@ namespace ImpinjR700
             ConfigureSinglePlot(formsPlotPhase.Plot, "Phase (rad)");
             formsPlotRssi.Refresh();
             formsPlotPhase.Refresh();
+            ClearSplitPlotControls(_splitRssiPlotsByEpc, _panelSplitRssiPlots);
+            ClearSplitPlotControls(_splitPhasePlotsByEpc, _panelSplitPhasePlots);
         }
 
         private static void ConfigureSinglePlot(ScottPlot.Plot plot, string yAxisLabel)
@@ -274,6 +281,43 @@ namespace ImpinjR700
             ConfigureSinglePlotContextMenu(formsPlotPhase);
         }
 
+        private void ConfigureSplitPlotContainers()
+        {
+            if (_panelSplitRssiPlots.Parent != null)
+            {
+                return;
+            }
+
+            ConfigureSplitPlotPanel(_panelSplitRssiPlots);
+            ConfigureSplitPlotPanel(_panelSplitPhasePlots);
+
+            tabChart.Controls.Add(_panelSplitRssiPlots);
+            tabPhase.Controls.Add(_panelSplitPhasePlots);
+            _panelSplitRssiPlots.SizeChanged += (_, _) => LayoutSplitPlotControls(_panelSplitRssiPlots);
+            _panelSplitPhasePlots.SizeChanged += (_, _) => LayoutSplitPlotControls(_panelSplitPhasePlots);
+            ApplySplitPlotVisibility();
+        }
+
+        private static void ConfigureSplitPlotPanel(Panel panel)
+        {
+            panel.AutoScroll = true;
+            panel.Dock = DockStyle.Fill;
+            panel.Visible = false;
+        }
+
+        private static void ClearSplitPlotControls(
+            Dictionary<string, ScottPlot.WinForms.FormsPlot> plotsByEpc,
+            Panel panel)
+        {
+            foreach (var plot in plotsByEpc.Values)
+            {
+                plot.Dispose();
+            }
+
+            plotsByEpc.Clear();
+            panel.Controls.Clear();
+        }
+
         private void ConfigureSinglePlotContextMenu(ScottPlot.WinForms.FormsPlot plotControl)
         {
             if (plotControl.Menu == null)
@@ -283,6 +327,79 @@ namespace ImpinjR700
 
             plotControl.Menu.AddSeparator();
             plotControl.Menu.Add("回到跟随状态", _ => ReturnToPlotFollowState());
+        }
+
+        private void ApplySplitPlotVisibility()
+        {
+            var splitByEpc = _checkSplitPlotByEpc.Checked;
+            formsPlotRssi.Visible = !splitByEpc;
+            formsPlotPhase.Visible = !splitByEpc;
+            _panelSplitRssiPlots.Visible = splitByEpc;
+            _panelSplitPhasePlots.Visible = splitByEpc;
+
+            if (splitByEpc)
+            {
+                _panelSplitRssiPlots.BringToFront();
+                _panelSplitPhasePlots.BringToFront();
+            }
+            else
+            {
+                formsPlotRssi.BringToFront();
+                formsPlotPhase.BringToFront();
+            }
+        }
+
+        private ScottPlot.WinForms.FormsPlot GetOrCreateSplitPlot(
+            Dictionary<string, ScottPlot.WinForms.FormsPlot> plotsByEpc,
+            Panel panel,
+            string epc,
+            string yAxisLabel)
+        {
+            if (plotsByEpc.TryGetValue(epc, out var plotControl))
+            {
+                return plotControl;
+            }
+
+            plotControl = new ScottPlot.WinForms.FormsPlot
+            {
+                Name = $"formsPlotSplit_{plotsByEpc.Count}",
+                Height = PlotSplitLayout.SingleSubplotHeight,
+                Margin = Padding.Empty,
+                Tag = epc
+            };
+            ConfigureSinglePlot(plotControl.Plot, yAxisLabel);
+            ConfigureSinglePlotContextMenu(plotControl);
+            plotsByEpc[epc] = plotControl;
+            panel.Controls.Add(plotControl);
+            LayoutSplitPlotControls(panel);
+            return plotControl;
+        }
+
+        private static void RemoveUnusedSplitPlots(
+            Dictionary<string, ScottPlot.WinForms.FormsPlot> plotsByEpc,
+            Panel panel,
+            HashSet<string> activeEpcs)
+        {
+            foreach (var epc in plotsByEpc.Keys.Where(epc => !activeEpcs.Contains(epc)).ToList())
+            {
+                var plot = plotsByEpc[epc];
+                panel.Controls.Remove(plot);
+                plotsByEpc.Remove(epc);
+                plot.Dispose();
+            }
+        }
+
+        private void LayoutSplitPlotControls(Panel panel)
+        {
+            var width = Math.Max(120, panel.ClientSize.Width - SystemInformation.VerticalScrollBarWidth);
+            var y = 0;
+            foreach (var plot in panel.Controls
+                .OfType<ScottPlot.WinForms.FormsPlot>()
+                .OrderBy(plot => plot.Tag as string, StringComparer.Ordinal))
+            {
+                plot.SetBounds(0, y, width, PlotSplitLayout.SingleSubplotHeight);
+                y += PlotSplitLayout.SingleSubplotHeight;
+            }
         }
 
         private void ReturnToPlotFollowState()
@@ -345,6 +462,7 @@ namespace ImpinjR700
             ConfigureStatisticsView();
             ConfigureEpcFilterControls();
             ResetPlotData();
+            ConfigureSplitPlotContainers();
             ConfigurePlotContextMenus();
 
             splitMain.SizeChanged += SplitMain_SizeChanged;
@@ -392,6 +510,18 @@ namespace ImpinjR700
                     SetSoundAlertEnabled(_checkSoundAlert.Checked);
                 };
                 groupExport.Controls.Add(_checkSoundAlert);
+
+                _checkSplitPlotByEpc.AutoSize = true;
+                _checkSplitPlotByEpc.Name = "checkSplitPlotByEpc";
+                _checkSplitPlotByEpc.Text = "分图显示";
+                _checkSplitPlotByEpc.Checked = false;
+                _checkSplitPlotByEpc.UseVisualStyleBackColor = true;
+                _checkSplitPlotByEpc.CheckedChanged += (_, _) =>
+                {
+                    ApplySplitPlotVisibility();
+                    ReturnToPlotFollowState();
+                };
+                groupExport.Controls.Add(_checkSplitPlotByEpc);
 
                 groupExport.SizeChanged += (_, _) => UpdateLegendToggleLayout();
                 checkPlotSelectionOnly.SizeChanged += (_, _) => UpdateLegendToggleLayout();
@@ -2474,25 +2604,21 @@ namespace ImpinjR700
 
             var rssiPlot = formsPlotRssi.Plot;
             var phasePlot = formsPlotPhase.Plot;
+            var splitByEpc = _checkSplitPlotByEpc.Checked;
             if (_forceFollowLatestOnNextRender)
             {
                 _forceFollowLatestOnNextRender = false;
             }
-            else
+            else if (!splitByEpc)
             {
                 CapturePlotViewportPreference(rssiPlot, phasePlot);
             }
-            rssiPlot.Clear();
-            phasePlot.Clear();
 
             var records = BuildRenderableRecords();
             if (records.Count == 0)
             {
                 _plotStartTime = null;
-                ApplyForwardXAxisLimits(rssiPlot, 0, PlotDisplayWindowSeconds);
-                ApplyForwardXAxisLimits(phasePlot, 0, PlotDisplayWindowSeconds);
-                formsPlotRssi.Refresh();
-                formsPlotPhase.Refresh();
+                RenderEmptyPlots(splitByEpc);
                 return;
             }
 
@@ -2500,10 +2626,7 @@ namespace ImpinjR700
             if (grouped.Count == 0)
             {
                 _plotStartTime = null;
-                ApplyForwardXAxisLimits(rssiPlot, 0, PlotDisplayWindowSeconds);
-                ApplyForwardXAxisLimits(phasePlot, 0, PlotDisplayWindowSeconds);
-                formsPlotRssi.Refresh();
-                formsPlotPhase.Refresh();
+                RenderEmptyPlots(splitByEpc);
                 return;
             }
 
@@ -2535,53 +2658,17 @@ namespace ImpinjR700
                 .ThenBy(entry => entry.Key.AntennaPort)
                 .ToList();
 
+            if (splitByEpc)
+            {
+                RenderSplitPlotsByEpc(orderedEntries, timeAxisStart, axisLeft, axisRight);
+                return;
+            }
+
+            rssiPlot.Clear();
+            phasePlot.Clear();
             foreach (var entry in orderedEntries)
             {
-                var samples = entry.Value;
-                if (samples.Count == 0)
-                {
-                    continue;
-                }
-
-                var legendText = FormatPlotLegend(entry.Key);
-                var seriesColor = GetPlotSeriesColor(entry.Key);
-
-                var rssiSegments = SplitSamplesByValidity(
-                    samples,
-                    static sample => !double.IsNaN(sample.Rssi) && !double.IsInfinity(sample.Rssi));
-                for (var i = 0; i < rssiSegments.Count; i++)
-                {
-                    var segment = rssiSegments[i];
-                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - timeAxisStart).TotalSeconds)).ToArray();
-                    var ys = segment.Select(sample => sample.Rssi).ToArray();
-                    var rssiScatter = rssiPlot.Add.Scatter(xs, ys);
-                    rssiScatter.Color = seriesColor;
-                    if (i == 0)
-                    {
-                        rssiScatter.LegendText = legendText;
-                    }
-                    rssiScatter.MarkerSize = 3;
-                    rssiScatter.LineWidth = 2;
-                }
-
-                var phaseSegments = SplitSamplesByValidity(
-                    samples,
-                    static sample => !double.IsNaN(sample.Phase) && !double.IsInfinity(sample.Phase));
-                for (var i = 0; i < phaseSegments.Count; i++)
-                {
-                    var segment = phaseSegments[i];
-                    var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - timeAxisStart).TotalSeconds)).ToArray();
-                    var ys = segment.Select(sample => sample.Phase).ToArray();
-                    var phaseScatter = phasePlot.Add.Scatter(xs, ys);
-                    phaseScatter.Color = seriesColor;
-                    if (i == 0)
-                    {
-                        phaseScatter.LegendText = legendText;
-                    }
-                    phaseScatter.MarkerSize = 2;
-                    phaseScatter.LineWidth = 1.5f;
-                    phaseScatter.LinePattern = ScottPlot.LinePattern.Dashed;
-                }
+                DrawPlotSeries(entry, rssiPlot, phasePlot, timeAxisStart);
             }
 
             rssiPlot.Axes.AutoScale();
@@ -2594,6 +2681,126 @@ namespace ImpinjR700
             ApplyLegendVisibility(phasePlot);
             formsPlotRssi.Refresh();
             formsPlotPhase.Refresh();
+        }
+
+        private void RenderEmptyPlots(bool splitByEpc)
+        {
+            if (splitByEpc)
+            {
+                ClearSplitPlotControls(_splitRssiPlotsByEpc, _panelSplitRssiPlots);
+                ClearSplitPlotControls(_splitPhasePlotsByEpc, _panelSplitPhasePlots);
+                return;
+            }
+
+            var rssiPlot = formsPlotRssi.Plot;
+            var phasePlot = formsPlotPhase.Plot;
+            rssiPlot.Clear();
+            phasePlot.Clear();
+            ApplyForwardXAxisLimits(rssiPlot, 0, PlotDisplayWindowSeconds);
+            ApplyForwardXAxisLimits(phasePlot, 0, PlotDisplayWindowSeconds);
+            formsPlotRssi.Refresh();
+            formsPlotPhase.Refresh();
+        }
+
+        private void RenderSplitPlotsByEpc(
+            IReadOnlyList<KeyValuePair<PlotSeriesKey, List<TagReadRecord>>> orderedEntries,
+            DateTime timeAxisStart,
+            double axisLeft,
+            double axisRight)
+        {
+            var orderedEpcs = PlotSplitLayout.GetOrderedEpcs(orderedEntries.Select(entry => entry.Key.Epc));
+            var activeEpcs = new HashSet<string>(orderedEpcs, StringComparer.Ordinal);
+            RemoveUnusedSplitPlots(_splitRssiPlotsByEpc, _panelSplitRssiPlots, activeEpcs);
+            RemoveUnusedSplitPlots(_splitPhasePlotsByEpc, _panelSplitPhasePlots, activeEpcs);
+
+            var entriesByEpc = orderedEntries
+                .GroupBy(entry => entry.Key.Epc, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+
+            foreach (var epc in orderedEpcs)
+            {
+                var rssiPlotControl = GetOrCreateSplitPlot(_splitRssiPlotsByEpc, _panelSplitRssiPlots, epc, "RSSI (dBm)");
+                var phasePlotControl = GetOrCreateSplitPlot(_splitPhasePlotsByEpc, _panelSplitPhasePlots, epc, "Phase (rad)");
+                var rssiPlot = rssiPlotControl.Plot;
+                var phasePlot = phasePlotControl.Plot;
+
+                ConfigureSinglePlot(rssiPlot, "RSSI (dBm)");
+                ConfigureSinglePlot(phasePlot, "Phase (rad)");
+                rssiPlot.Title(epc);
+                phasePlot.Title(epc);
+
+                foreach (var entry in entriesByEpc[epc])
+                {
+                    DrawPlotSeries(entry, rssiPlot, phasePlot, timeAxisStart);
+                }
+
+                rssiPlot.Axes.AutoScale();
+                phasePlot.Axes.AutoScale();
+                ApplyForwardXAxisLimits(rssiPlot, axisLeft, axisRight);
+                ApplyForwardXAxisLimits(phasePlot, axisLeft, axisRight);
+                ApplyLegendVisibility(rssiPlot);
+                ApplyLegendVisibility(phasePlot);
+                rssiPlotControl.Refresh();
+                phasePlotControl.Refresh();
+            }
+
+            _panelSplitRssiPlots.AutoScrollMinSize = new Size(0, PlotSplitLayout.GetSubplotHeight(orderedEpcs.Length));
+            _panelSplitPhasePlots.AutoScrollMinSize = new Size(0, PlotSplitLayout.GetSubplotHeight(orderedEpcs.Length));
+            LayoutSplitPlotControls(_panelSplitRssiPlots);
+            LayoutSplitPlotControls(_panelSplitPhasePlots);
+        }
+
+        private void DrawPlotSeries(
+            KeyValuePair<PlotSeriesKey, List<TagReadRecord>> entry,
+            ScottPlot.Plot rssiPlot,
+            ScottPlot.Plot phasePlot,
+            DateTime timeAxisStart)
+        {
+            var samples = entry.Value;
+            if (samples.Count == 0)
+            {
+                return;
+            }
+
+            var legendText = FormatPlotLegend(entry.Key);
+            var seriesColor = GetPlotSeriesColor(entry.Key);
+
+            var rssiSegments = SplitSamplesByValidity(
+                samples,
+                static sample => !double.IsNaN(sample.Rssi) && !double.IsInfinity(sample.Rssi));
+            for (var i = 0; i < rssiSegments.Count; i++)
+            {
+                var segment = rssiSegments[i];
+                var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - timeAxisStart).TotalSeconds)).ToArray();
+                var ys = segment.Select(sample => sample.Rssi).ToArray();
+                var rssiScatter = rssiPlot.Add.Scatter(xs, ys);
+                rssiScatter.Color = seriesColor;
+                if (i == 0)
+                {
+                    rssiScatter.LegendText = legendText;
+                }
+                rssiScatter.MarkerSize = 3;
+                rssiScatter.LineWidth = 2;
+            }
+
+            var phaseSegments = SplitSamplesByValidity(
+                samples,
+                static sample => !double.IsNaN(sample.Phase) && !double.IsInfinity(sample.Phase));
+            for (var i = 0; i < phaseSegments.Count; i++)
+            {
+                var segment = phaseSegments[i];
+                var xs = segment.Select(sample => Math.Max(0, (sample.LastSeen - timeAxisStart).TotalSeconds)).ToArray();
+                var ys = segment.Select(sample => sample.Phase).ToArray();
+                var phaseScatter = phasePlot.Add.Scatter(xs, ys);
+                phaseScatter.Color = seriesColor;
+                if (i == 0)
+                {
+                    phaseScatter.LegendText = legendText;
+                }
+                phaseScatter.MarkerSize = 2;
+                phaseScatter.LineWidth = 1.5f;
+                phaseScatter.LinePattern = ScottPlot.LinePattern.Dashed;
+            }
         }
 
         private void CapturePlotViewportPreference(ScottPlot.Plot rssiPlot, ScottPlot.Plot phasePlot)
@@ -3506,7 +3713,7 @@ namespace ImpinjR700
 
         private void UpdateLegendToggleLayout()
         {
-            if (_checkShowLegend.Parent == null || _checkSoundAlert.Parent == null)
+            if (_checkShowLegend.Parent == null || _checkSoundAlert.Parent == null || _checkSplitPlotByEpc.Parent == null)
             {
                 return;
             }
@@ -3514,20 +3721,21 @@ namespace ImpinjR700
             var x = checkPlotSelectionOnly.Right + UiGroupSpacing;
             var y = checkPlotSelectionOnly.Top;
             var maxX = Math.Max(UiGroupPadding, groupExport.ClientSize.Width - UiGroupPadding);
+            var nextX = x;
+            var nextY = y;
 
-            var legendX = Math.Min(x, Math.Max(UiGroupPadding, maxX - _checkShowLegend.Width));
-            _checkShowLegend.Location = new Point(legendX, y);
-
-            var soundX = _checkShowLegend.Right + UiGroupSpacing;
-            if (soundX + _checkSoundAlert.Width <= maxX)
+            foreach (var option in new[] { _checkShowLegend, _checkSoundAlert, _checkSplitPlotByEpc })
             {
-                _checkSoundAlert.Location = new Point(soundX, y);
-                return;
-            }
+                if (nextX + option.Width > maxX && nextX > x)
+                {
+                    nextX = x;
+                    nextY += option.Height + UiGroupSpacing;
+                }
 
-            var secondRowX = Math.Min(x, Math.Max(UiGroupPadding, maxX - _checkSoundAlert.Width));
-            var secondRowY = _checkShowLegend.Bottom + UiGroupSpacing;
-            _checkSoundAlert.Location = new Point(secondRowX, secondRowY);
+                var safeX = Math.Min(nextX, Math.Max(UiGroupPadding, maxX - option.Width));
+                option.Location = new Point(safeX, nextY);
+                nextX = option.Right + UiGroupSpacing;
+            }
         }
 
         /// <summary>

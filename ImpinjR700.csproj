@@ -15,4 +15,8 @@
     <PackageReference Include="ScottPlot.WinForms" Version="5.1.57" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
 </Project>
