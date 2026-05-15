@@ -50,6 +50,7 @@ namespace ImpinjR700
         private static readonly int MaxReadHistoryRecords = 0;
         private static readonly TimeSpan PlotRenderThrottleInterval = TimeSpan.FromMilliseconds(50);
         private static readonly TimeSpan TagProcessInterval = TimeSpan.FromMilliseconds(20);
+        private static readonly TimeSpan SimulatedEpcProfileInterval = TimeSpan.FromMilliseconds(600);
         private static readonly TimeSpan ConnectionMonitorInterval = TimeSpan.FromSeconds(1);
         private const int ConnectionMonitorTimeoutMs = 300;
         private const int ConnectionMonitorFailureThreshold = 2;
@@ -116,6 +117,7 @@ namespace ImpinjR700
         private bool _isUpdatingEpcSelection;
         private bool _isSignalTestRunning;
         private DateTime _signalTestStartTime = DateTime.MinValue;
+        private int _lastSimulatedEpcProfileIndex = -1;
         private DateTime _lastSoundAlertTime = DateTime.MinValue;
         private long _lastTagActivityUtcTicks;
         private int _soundAlertPlaying;
@@ -127,11 +129,17 @@ namespace ImpinjR700
         private bool _isTimedReadActive;
         private bool _soundAlertEnabled = true;
         private readonly HashSet<string> _selectedPlotEpcs = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _observedEpcs = new(StringComparer.Ordinal);
         private readonly Dictionary<PlotSeriesKey, ScottPlot.Color> _plotSeriesColors = new();
         private readonly Dictionary<string, ushort> _signalReadCountByEpc = new();
+        private readonly EpcCharacterOutputSettingsStore _epcCharacterOutputSettingsStore = new();
+        private readonly EpcCharacterOutputEngine _epcCharacterOutputEngine = new();
+        private EpcCharacterOutputSettings _epcCharacterOutputSettings = EpcCharacterOutputSettingsStore.CreateDefaultSettings();
+        private EpcCharacterOutputForm? _epcCharacterOutputForm;
         private readonly CheckBox _checkShowLegend = new();
         private readonly CheckBox _checkSoundAlert = new();
         private readonly CheckBox _checkSplitPlotByEpc = new();
+        private readonly Button _buttonCharacterOutput = new();
         private readonly Panel _panelSplitRssiPlots = new();
         private readonly Panel _panelSplitPhasePlots = new();
         private readonly Dictionary<string, ScottPlot.WinForms.FormsPlot> _splitRssiPlotsByEpc = new(StringComparer.Ordinal);
@@ -163,6 +171,8 @@ namespace ImpinjR700
 
         public Form1()
         {
+            _epcCharacterOutputSettings = _epcCharacterOutputSettingsStore.Load();
+            _epcCharacterOutputEngine.UpdateSettings(_epcCharacterOutputSettings);
             InitializeComponent();
             _readHistoryBinding = new BindingList<TagReadRecord>();
             _plotRenderTimer = new System.Windows.Forms.Timer
@@ -481,6 +491,10 @@ namespace ImpinjR700
             buttonClear.Click += (_, _) => ClearTagData("已清空标签记录。");
             buttonExportCsv.Click += async (_, _) => await ExportCsvAsync();
             buttonExportExcel.Click += async (_, _) => await ExportExcelAsync();
+            _buttonCharacterOutput.Text = "字符输出...";
+            _buttonCharacterOutput.Name = "buttonCharacterOutput";
+            _buttonCharacterOutput.UseVisualStyleBackColor = true;
+            _buttonCharacterOutput.Click += (_, _) => ShowEpcCharacterOutputForm();
             checkAutoReconnect.CheckedChanged += (_, _) =>
             {
                 if (!checkAutoReconnect.Checked)
@@ -522,6 +536,7 @@ namespace ImpinjR700
                     ReturnToPlotFollowState();
                 };
                 groupExport.Controls.Add(_checkSplitPlotByEpc);
+                groupExport.Controls.Add(_buttonCharacterOutput);
 
                 groupExport.SizeChanged += (_, _) => UpdateLegendToggleLayout();
                 checkPlotSelectionOnly.SizeChanged += (_, _) => UpdateLegendToggleLayout();
@@ -544,6 +559,7 @@ namespace ImpinjR700
                 _timedReadTimer.Stop();
                 _connectionMonitorTimer.Stop();
                 ResetPendingTagQueue();
+                _epcCharacterOutputForm?.Close();
             };
 
             checkedListAntennas.Enabled = true;
@@ -592,7 +608,8 @@ namespace ImpinjR700
                 buttonTestSignal,
                 buttonExportCsv,
                 buttonExportExcel,
-                buttonClear
+                buttonClear,
+                _buttonCharacterOutput
             };
 
             foreach (var button in buttons)
@@ -716,6 +733,11 @@ namespace ImpinjR700
             buttonClear.SetBounds(buttonExportExcel.Right + UiGroupSpacing, buttonTop, buttonWidth, UiButtonHeight);
 
             checkPlotSelectionOnly.Location = new Point(contentLeft, buttonExportCsv.Bottom + UiGroupSpacing);
+            _buttonCharacterOutput.SetBounds(
+                contentLeft,
+                Math.Max(checkPlotSelectionOnly.Bottom + UiSectionSpacing, groupExport.ClientSize.Height - UiGroupPadding - UiButtonHeight),
+                Math.Min(UiActionButtonWidth, Math.Max(104, contentWidth)),
+                UiButtonHeight);
             UpdateLegendToggleLayout();
         }
 
@@ -1854,6 +1876,7 @@ namespace ImpinjR700
             foreach (var item in batch)
             {
                 var epc = item.Epc;
+                ProcessEpcCharacterOutput(epc, item.LastSeen);
                 if (!ShouldCacheRecord(epc))
                 {
                     continue;
@@ -2107,6 +2130,7 @@ namespace ImpinjR700
         private void StartSignalTest()
         {
             _signalTestStartTime = DateTime.Now;
+            _lastSimulatedEpcProfileIndex = -1;
             _signalReadCountByEpc.Clear();
             _isSignalTestRunning = true;
             buttonTestSignal.Text = "停止模拟测试";
@@ -2123,6 +2147,7 @@ namespace ImpinjR700
 
             _signalTestTimer.Stop();
             _isSignalTestRunning = false;
+            _lastSimulatedEpcProfileIndex = -1;
             buttonTestSignal.Text = "模拟测试信号";
             if (logStop)
             {
@@ -2144,25 +2169,34 @@ namespace ImpinjR700
         {
             var now = DateTime.Now;
             var elapsedSeconds = (now - _signalTestStartTime).TotalSeconds;
+            var profileIndex = GetSimulatedProfileIndex(
+                _signalTestStartTime,
+                now,
+                _simulatedEpcProfiles.Length,
+                SimulatedEpcProfileInterval);
+            if (profileIndex < 0 || profileIndex == _lastSimulatedEpcProfileIndex)
+            {
+                return;
+            }
+
+            _lastSimulatedEpcProfileIndex = profileIndex;
             var epcListChanged = false;
             var newRecords = new List<TagReadRecord>();
+            var profile = _simulatedEpcProfiles[profileIndex];
 
-            foreach (var profile in _simulatedEpcProfiles)
+            foreach (var antennaPort in SimulatedAntennaPorts)
             {
-                foreach (var antennaPort in SimulatedAntennaPorts)
-                {
-                    var antennaBias = antennaPort == 1 ? 0.0 : -2.5;
-                    var antennaPhaseOffset = antennaPort == 1 ? 0.0 : Math.PI / 6;
-                    epcListChanged |= EmitSimulatedSample(
-                        now,
-                        elapsedSeconds,
-                        newRecords,
-                        profile.Epc,
-                        antennaPort,
-                        baseRssi: profile.BaseRssi + antennaBias,
-                        rssiPhaseShift: profile.RssiPhaseShift + antennaPhaseOffset,
-                        phaseShift: profile.PhaseShift + antennaPhaseOffset);
-                }
+                var antennaBias = antennaPort == 1 ? 0.0 : -2.5;
+                var antennaPhaseOffset = antennaPort == 1 ? 0.0 : Math.PI / 6;
+                epcListChanged |= EmitSimulatedSample(
+                    now,
+                    elapsedSeconds,
+                    newRecords,
+                    profile.Epc,
+                    antennaPort,
+                    baseRssi: profile.BaseRssi + antennaBias,
+                    rssiPhaseShift: profile.RssiPhaseShift + antennaPhaseOffset,
+                    phaseShift: profile.PhaseShift + antennaPhaseOffset);
             }
 
             AddReadHistoryRecords(newRecords);
@@ -2175,6 +2209,22 @@ namespace ImpinjR700
             RequestPlotRender();
             RequestStatisticsRefresh();
             UpdateExportButtons();
+        }
+
+        private static int GetSimulatedProfileIndex(
+            DateTime sequenceStart,
+            DateTime now,
+            int profileCount,
+            TimeSpan profileInterval)
+        {
+            if (profileCount <= 0)
+            {
+                return -1;
+            }
+
+            var intervalMilliseconds = Math.Max(1, profileInterval.TotalMilliseconds);
+            var elapsedMilliseconds = Math.Max(0, (now - sequenceStart).TotalMilliseconds);
+            return (int)(Math.Floor(elapsedMilliseconds / intervalMilliseconds) % profileCount);
         }
 
         private bool EmitSimulatedSample(
@@ -2192,6 +2242,8 @@ namespace ImpinjR700
             var noise = (_signalNoiseRandom.NextDouble() - 0.5) * 1.2;
             var rssi = Math.Clamp(baseRssi + periodic + fastRipple + noise, -82, -30);
             var phase = (elapsedSeconds * 1.8 + phaseShift) % (2 * Math.PI);
+
+            ProcessEpcCharacterOutput(epc, now);
 
             if (!ShouldCacheRecord(epc))
             {
@@ -3533,6 +3585,8 @@ namespace ImpinjR700
         {
             ResetPendingTagQueue();
             _tagIndex.Clear();
+            _observedEpcs.Clear();
+            _epcCharacterOutputForm?.RefreshKnownEpcs();
             _signalReadCountByEpc.Clear();
             lock (_cacheLock)
             {
@@ -3735,6 +3789,70 @@ namespace ImpinjR700
                 var safeX = Math.Min(nextX, Math.Max(UiGroupPadding, maxX - option.Width));
                 option.Location = new Point(safeX, nextY);
                 nextX = option.Right + UiGroupSpacing;
+            }
+        }
+
+        private void ShowEpcCharacterOutputForm()
+        {
+            if (_epcCharacterOutputForm is { IsDisposed: false })
+            {
+                _epcCharacterOutputForm.RefreshKnownEpcs();
+                _epcCharacterOutputForm.SetOutputText(_epcCharacterOutputEngine.CurrentOutput);
+                _epcCharacterOutputForm.Activate();
+                return;
+            }
+
+            _epcCharacterOutputForm = new EpcCharacterOutputForm(
+                _epcCharacterOutputSettings.Clone(),
+                GetObservedEpcsSnapshot,
+                ApplyEpcCharacterOutputSettings,
+                ClearEpcCharacterOutput);
+            _epcCharacterOutputForm.SetOutputText(_epcCharacterOutputEngine.CurrentOutput);
+            _epcCharacterOutputForm.FormClosed += (_, _) => _epcCharacterOutputForm = null;
+            _epcCharacterOutputForm.Show(this);
+        }
+
+        private IReadOnlyList<string> GetObservedEpcsSnapshot()
+        {
+            return _observedEpcs.ToArray();
+        }
+
+        private void ApplyEpcCharacterOutputSettings(EpcCharacterOutputSettings settings)
+        {
+            _epcCharacterOutputSettings = settings.Clone();
+            _epcCharacterOutputEngine.UpdateSettings(_epcCharacterOutputSettings);
+
+            try
+            {
+                _epcCharacterOutputSettingsStore.Save(_epcCharacterOutputSettings);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"保存 EPC 字符输出设置失败：{ex.Message}");
+            }
+        }
+
+        private void ClearEpcCharacterOutput()
+        {
+            _epcCharacterOutputEngine.ClearOutput();
+        }
+
+        private void ProcessEpcCharacterOutput(string epc, DateTime timestamp)
+        {
+            var normalizedEpc = EpcCharacterOutputEngine.NormalizeEpc(epc);
+            if (string.IsNullOrEmpty(normalizedEpc))
+            {
+                return;
+            }
+
+            if (_observedEpcs.Add(normalizedEpc))
+            {
+                _epcCharacterOutputForm?.RefreshKnownEpcs();
+            }
+
+            if (_epcCharacterOutputEngine.TryEmit(normalizedEpc, timestamp, out _, out var currentOutput))
+            {
+                _epcCharacterOutputForm?.SetOutputText(currentOutput);
             }
         }
 
