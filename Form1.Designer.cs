@@ -86,6 +86,8 @@ namespace ImpinjR700
             this.checkedListEpcSelection = new System.Windows.Forms.CheckedListBox();
             this.tabChart = new System.Windows.Forms.TabPage();
             this.formsPlotRssi = new ScottPlot.WinForms.FormsPlot();
+            this.tabMaxRssi = new System.Windows.Forms.TabPage();
+            this.formsPlotMaxRssi = new ScottPlot.WinForms.FormsPlot();
             this.tabPhase = new System.Windows.Forms.TabPage();
             this.formsPlotPhase = new ScottPlot.WinForms.FormsPlot();
             ((System.ComponentModel.ISupportInitialize)(this.splitMain)).BeginInit();
@@ -105,6 +107,7 @@ namespace ImpinjR700
             this.tableStats.SuspendLayout();
             this.groupEpcSelection.SuspendLayout();
             this.tabChart.SuspendLayout();
+            this.tabMaxRssi.SuspendLayout();
             this.tabPhase.SuspendLayout();
             this.SuspendLayout();
             // 
@@ -160,6 +163,7 @@ namespace ImpinjR700
             // 
             // groupConnection
             // 
+            this.groupConnection.Controls.Add(this.buttonTestSignal);
             this.groupConnection.Controls.Add(this.labelStatusValue);
             this.groupConnection.Controls.Add(this.labelStatusCaption);
             this.groupConnection.Controls.Add(this.buttonReaderInfo);
@@ -241,7 +245,6 @@ namespace ImpinjR700
             // 
             // groupControl
             // 
-            this.groupControl.Controls.Add(this.buttonTestSignal);
             this.groupControl.Controls.Add(this.buttonTimedRead);
             this.groupControl.Controls.Add(this.labelTimedReadDuration);
             this.groupControl.Controls.Add(this.numericTimedReadDuration);
@@ -261,7 +264,7 @@ namespace ImpinjR700
             // 
             // buttonTestSignal
             // 
-            this.buttonTestSignal.Location = new System.Drawing.Point(206, 148);
+            this.buttonTestSignal.Location = new System.Drawing.Point(50, 142);
             this.buttonTestSignal.Name = "buttonTestSignal";
             this.buttonTestSignal.Size = new System.Drawing.Size(128, 30);
             this.buttonTestSignal.TabIndex = 7;
@@ -510,6 +513,7 @@ namespace ImpinjR700
             this.tabBottom.Controls.Add(this.tabLog);
             this.tabBottom.Controls.Add(this.tabStatistics);
             this.tabBottom.Controls.Add(this.tabChart);
+            this.tabBottom.Controls.Add(this.tabMaxRssi);
             this.tabBottom.Controls.Add(this.tabPhase);
             this.tabBottom.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tabBottom.Location = new System.Drawing.Point(0, 0);
@@ -551,20 +555,18 @@ namespace ImpinjR700
             this.tabStatistics.Padding = new System.Windows.Forms.Padding(3);
             this.tabStatistics.Size = new System.Drawing.Size(1092, 186);
             this.tabStatistics.TabIndex = 1;
-            this.tabStatistics.Text = "统计信息";
+            this.tabStatistics.Text = "EPC 筛选";
             this.tabStatistics.UseVisualStyleBackColor = true;
             // 
             // tableStats
             // 
             this.tableStats.ColumnCount = 1;
             this.tableStats.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100F));
-            this.tableStats.Controls.Add(this.listStatistics, 0, 0);
-            this.tableStats.Controls.Add(this.groupEpcSelection, 0, 1);
+            this.tableStats.Controls.Add(this.groupEpcSelection, 0, 0);
             this.tableStats.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tableStats.Location = new System.Drawing.Point(3, 3);
             this.tableStats.Name = "tableStats";
-            this.tableStats.RowCount = 2;
-            this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 160F));
+            this.tableStats.RowCount = 1;
             this.tableStats.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100F));
             this.tableStats.Size = new System.Drawing.Size(1086, 180);
             this.tableStats.TabIndex = 1;
@@ -598,9 +600,9 @@ namespace ImpinjR700
             // 
             this.groupEpcSelection.Controls.Add(this.checkedListEpcSelection);
             this.groupEpcSelection.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.groupEpcSelection.Location = new System.Drawing.Point(3, 113);
+            this.groupEpcSelection.Location = new System.Drawing.Point(3, 3);
             this.groupEpcSelection.Name = "groupEpcSelection";
-            this.groupEpcSelection.Size = new System.Drawing.Size(1080, 64);
+            this.groupEpcSelection.Size = new System.Drawing.Size(1080, 174);
             this.groupEpcSelection.TabIndex = 1;
             this.groupEpcSelection.TabStop = false;
             this.groupEpcSelection.Text = "EPC 筛选（用于绘图）";
@@ -614,7 +616,7 @@ namespace ImpinjR700
             this.checkedListEpcSelection.IntegralHeight = false;
             this.checkedListEpcSelection.Location = new System.Drawing.Point(3, 19);
             this.checkedListEpcSelection.Name = "checkedListEpcSelection";
-            this.checkedListEpcSelection.Size = new System.Drawing.Size(1074, 42);
+            this.checkedListEpcSelection.Size = new System.Drawing.Size(1074, 152);
             this.checkedListEpcSelection.TabIndex = 0;
             // 
             // columnStatName
@@ -682,6 +684,26 @@ namespace ImpinjR700
             this.formsPlotRssi.Size = new System.Drawing.Size(1086, 180);
             this.formsPlotRssi.TabIndex = 0;
             // 
+            // tabMaxRssi
+            // 
+            this.tabMaxRssi.Controls.Add(this.formsPlotMaxRssi);
+            this.tabMaxRssi.Location = new System.Drawing.Point(4, 26);
+            this.tabMaxRssi.Name = "tabMaxRssi";
+            this.tabMaxRssi.Padding = new System.Windows.Forms.Padding(3);
+            this.tabMaxRssi.Size = new System.Drawing.Size(1092, 186);
+            this.tabMaxRssi.TabIndex = 4;
+            this.tabMaxRssi.Text = "最大RSSI曲线";
+            this.tabMaxRssi.UseVisualStyleBackColor = true;
+            // 
+            // formsPlotMaxRssi
+            // 
+            this.formsPlotMaxRssi.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.formsPlotMaxRssi.Location = new System.Drawing.Point(3, 3);
+            this.formsPlotMaxRssi.Margin = new System.Windows.Forms.Padding(0);
+            this.formsPlotMaxRssi.Name = "formsPlotMaxRssi";
+            this.formsPlotMaxRssi.Size = new System.Drawing.Size(1086, 180);
+            this.formsPlotMaxRssi.TabIndex = 0;
+            // 
             // tabPhase
             // 
             this.tabPhase.Controls.Add(this.formsPlotPhase);
@@ -735,6 +757,7 @@ namespace ImpinjR700
             this.groupEpcSelection.ResumeLayout(false);
             this.groupEpcSelection.PerformLayout();
             this.tabChart.ResumeLayout(false);
+            this.tabMaxRssi.ResumeLayout(false);
             this.tabPhase.ResumeLayout(false);
             this.ResumeLayout(false);
 
@@ -798,6 +821,8 @@ namespace ImpinjR700
         private System.Windows.Forms.CheckedListBox checkedListEpcSelection;
         private System.Windows.Forms.TabPage tabChart;
         private ScottPlot.WinForms.FormsPlot formsPlotRssi;
+        private System.Windows.Forms.TabPage tabMaxRssi;
+        private ScottPlot.WinForms.FormsPlot formsPlotMaxRssi;
         private System.Windows.Forms.TabPage tabPhase;
         private ScottPlot.WinForms.FormsPlot formsPlotPhase;
     }
