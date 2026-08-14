@@ -1199,7 +1199,7 @@ namespace ImpinjR700
                 buttonStop.Enabled = _readSessionState.IsPaused;
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                EnableAllAntennaPorts();
+                // 启动失败时保持用户原来的天线选择，避免异常兜底把 1/2/3/4 全部打开。
                 UpdateAntennaConfigurationButtonState();
             }
             catch (Exception ex)
@@ -1214,7 +1214,7 @@ namespace ImpinjR700
                 buttonStop.Enabled = _readSessionState.IsPaused;
                 AppendLog($"启动读取失败：{ex.Message}");
                 MessageBox.Show(this, $"启动读取失败：{ex.Message}", "读取错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                EnableAllAntennaPorts();
+                // 启动失败时保持用户原来的天线选择，避免异常兜底把 1/2/3/4 全部打开。
                 UpdateAntennaConfigurationButtonState();
             }
         }
@@ -1548,7 +1548,11 @@ namespace ImpinjR700
 
         private void ApplyAntennaSelectionAfterReaderSync(IEnumerable<ushort>? enabledPorts)
         {
-            var ports = enabledPorts?.ToHashSet() ?? LoadStoredAntennaSelection();
+            var storedPorts = LoadStoredAntennaSelection();
+            var ports = storedPorts.Count > 0
+                ? storedPorts
+                : enabledPorts?.ToHashSet() ?? new HashSet<ushort>();
+
             ApplyAntennaSelectionToUi(ports);
             AppendLog($"天线UI同步：{FormatAntennaSelection(ports)}");
         }
@@ -1873,7 +1877,6 @@ namespace ImpinjR700
                 TraceSdkCall("reader.ApplySettings(settings)", reader, () => reader.ApplySettings(settings));
 
                 var enabledPorts = ReadEnabledPorts(settings).ToList();
-                PersistAntennaSelection(enabledPorts);
 
                 AppendLog("连接初始化：配置应用完成。");
                 TraceDebugState("InitializeReaderOnConnect SUCCESS", reader, $"enabledPorts={FormatDebugPorts(enabledPorts)}");
